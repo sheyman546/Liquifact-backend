@@ -10,6 +10,7 @@ const {
   resolveSigningConfig,
   submitEscrowFunding,
 } = require('../src/services/escrowSubmit');
+const { simulateOrThrowSync } = require('../src/services/sorobanSim');
 
 const PUBLIC_KEY = `G${'A'.repeat(55)}`;
 const CONTRACT_ID = `C${'A'.repeat(55)}`;
@@ -61,6 +62,10 @@ describe('escrowSubmit design stub', () => {
       signedXdrAccepted: false,
       hash: null,
     });
+    expect(result.simulation).toEqual({
+      simulated: false,
+      simulationStatus: null,
+    });
     expect(result.intent).toMatchObject({
       operation: 'fund_escrow',
       invoiceId: 'inv_123',
@@ -89,6 +94,10 @@ describe('escrowSubmit design stub', () => {
     expect(result.intent.amount).toBe('25');
     expect(result.intent.idempotencyKey).toBe('header-key-0001');
     expect(result.status).toBe(SUBMISSION_STATUSES.REQUIRES_SIGNATURE);
+    expect(result.simulation).toEqual({
+      simulated: false,
+      simulationStatus: null,
+    });
   });
 
   it('returns requires_configuration for custodial mode without KMS and network env', async () => {
@@ -104,6 +113,10 @@ describe('escrowSubmit design stub', () => {
     expect(result.signingMode).toBe(SIGNING_MODES.CUSTODIAL);
     expect(result.controls.custodialSigningReady).toBe(false);
     expect(result.controls.custodialKeyConfigured).toBe(false);
+    expect(result.simulation).toEqual({
+      simulated: false,
+      simulationStatus: null,
+    });
   });
 
   it('accepts delegated signed XDR only as a non-submitted design stub', async () => {
@@ -119,6 +132,10 @@ describe('escrowSubmit design stub', () => {
     expect(result.submitted).toBe(false);
     expect(result.transaction.signedXdrAccepted).toBe(true);
     expect(result.controls.delegatedSubmissionReady).toBe(true);
+    expect(result.simulation).toEqual({
+      simulated: true,
+      simulationStatus: expect.any(String),
+    });
   });
 
   it('requires network configuration before accepting delegated signed XDR for submission', async () => {
@@ -131,6 +148,10 @@ describe('escrowSubmit design stub', () => {
 
     expect(result.status).toBe(SUBMISSION_STATUSES.REQUIRES_CONFIGURATION);
     expect(result.nextAction).toBe('configure_soroban_network_before_accepting_signed_xdr');
+    expect(result.simulation).toEqual({
+      simulated: false,
+      simulationStatus: null,
+    });
   });
 
   it('does not expose custodial key identifiers when custodial env is configured', async () => {
@@ -148,6 +169,10 @@ describe('escrowSubmit design stub', () => {
     expect(result.status).toBe(SUBMISSION_STATUSES.STUBBED);
     expect(result.controls.custodialSigningReady).toBe(true);
     expect(JSON.stringify(result)).not.toContain('liquifact/escrow/fund/v1');
+    expect(result.simulation).toEqual({
+      simulated: false,
+      simulationStatus: null,
+    });
   });
 
   it('rejects invalid funding payloads with collected validation details', async () => {
@@ -245,6 +270,10 @@ describe('POST /api/escrow funding stub', () => {
       signingMode: SIGNING_MODES.DELEGATED,
       controls: {
         liveSubmissionEnabled: false,
+      },
+      simulation: {
+        simulated: false,
+        simulationStatus: null,
       },
       intent: {
         invoiceId: 'inv_123',

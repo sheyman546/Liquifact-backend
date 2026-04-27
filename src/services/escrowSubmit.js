@@ -1,6 +1,7 @@
 'use strict';
 
 const AppError = require('../errors/AppError');
+const { simulateOrThrowSync, SIMULATION_STATUS, SIMULATION_ERROR_TYPES } = require('./sorobanSim');
 
 const SIGNING_MODES = Object.freeze({
   CUSTODIAL: 'custodial',
@@ -44,6 +45,9 @@ function isPlainObject(value) {
  */
 function optionalString(value) {
   if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value === 'object') {
     return undefined;
   }
   return String(value).trim();
@@ -406,11 +410,11 @@ function normalizeConfiguredContractId(value) {
 /**
  * Resolves env-driven signing configuration without exposing key material.
  *
- * @param {NodeJS.ProcessEnv} [env=process.env] - Environment variable source.
  * @param {string} [requestedMode] - Request-level signing mode override.
+ * @param {NodeJS.ProcessEnv} [env=process.env] - Environment variable source.
  * @returns {Object} Redacted signing configuration.
  */
-function resolveSigningConfig(env = process.env, requestedMode) {
+function resolveSigningConfig(requestedMode, env = process.env) {
   const mode = requestedMode || normalizeConfiguredSigningMode(env);
   const rpcUrl = normalizeConfiguredRpcUrl(env.SOROBAN_RPC_URL);
   const networkPassphrase = optionalString(env.STELLAR_NETWORK_PASSPHRASE) || null;
@@ -513,11 +517,60 @@ function determineStubOutcome(request, config) {
 }
 
 /**
+ * Simulates a Soroban transaction before submission.
+ *
+ * This function calls the simulateOrThrow utility to validate that the
+ * transaction would succeed before attempting actual submission. It uses
+ * the cached footprint when available to avoid redundant simulations.
+ *
+ * @param {Object} request - Normalized funding request.
+ * @param {Object} config - Signing configuration.
+ * @returns {Promise<Object>} Simulation result or null if simulation is skipped.
+ */
+async function simulateBeforeSubmit(request, config) {
+  // Only simulate if we have a signed XDR and the network is configured
+  if (!request.signedTransactionXdr || !config.network.escrowContractId) {
+    return null;
+  }
+
+  try {
+    const simulationResult = await simulateOrThrowSync({
+      operation: FUND_OPERATION,
+      invoiceId: request.invoiceId,
+      funderPublicKey: request.funderPublicKey,
+      transactionXdr: request.signedTransactionXdr,
+      options: {
+        useCache: true,
+      },
+    });
+
+    return {
+      simulated: true,
+      simulationStatus: simulationResult.status,
+      footprint: simulationResult.footprint,
+      resourceConfig: simulationResult.resourceConfig,
+      cached: simulationResult.cached,
+    };
+  } catch (error) {
+    // Return simulation failure without throwing - the caller decides how to handle
+    return {
+      simulated: true,
+      simulationStatus: SIMULATION_STATUS.FAILURE,
+      error: error,
+    };
+  }
+}
+
+/**
  * Validates an escrow funding request and returns a no-submit Soroban intent.
  *
  * This service intentionally never signs with a custodial key and never sends
  * a transaction to Soroban. Future live submission code must replace this
  * stub behind explicit env gates and tests.
+ *
+ * When a signed transaction XDR is provided and the network is configured,
+ * this function now simulates the transaction before submission to validate
+ * it would succeed. The simulation result is included in the response.
  *
  * @param {unknown} payload - Raw funding request payload.
  * @param {Object} [options={}] - Request context.
@@ -538,6 +591,12 @@ async function submitEscrowFunding(payload, options = {}) {
   const config = resolveSigningConfig(normalizedOptions.env, request.signingMode);
   const outcome = determineStubOutcome(request, config);
 
+  // Simulate transaction if we have a signed XDR and network is configured
+  let simulationResult = null;
+  if (request.signedTransactionXdr && config.network.ready) {
+    simulationResult = await simulateBeforeSubmit(request, config);
+  }
+
   return {
     status: outcome.status,
     submitted: false,
@@ -549,6 +608,10 @@ async function submitEscrowFunding(payload, options = {}) {
       unsignedXdr: null,
       signedXdrAccepted: Boolean(request.signedTransactionXdr),
       hash: null,
+    },
+    simulation: simulationResult || {
+      simulated: false,
+      simulationStatus: null,
     },
     controls: {
       liveSubmissionEnabled: false,
