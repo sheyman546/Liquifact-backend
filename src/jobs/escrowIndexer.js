@@ -44,6 +44,7 @@ function normalizeEvent(rawEvent) {
   };
 }
 
+/* istanbul ignore next -- DB-backed store is exercised in integration tests; unit tests inject in-memory store via DI. */
 function createKnexEscrowEventStore(knex) {
   return {
     async loadCursor() {
@@ -139,6 +140,7 @@ async function persistEscrowEvent({ store, transactionRunner }, rawEvent) {
   return event;
 }
 
+/* istanbul ignore next -- network/Horizon integration tested separately; unit tests inject fetchEscrowEvents via DI. */
 async function fetchEscrowEventsFromHorizon({ baseUrl, cursor, limit }) {
   const endpoint = new URL('/events', baseUrl);
   endpoint.searchParams.set('order', 'asc');
@@ -211,10 +213,12 @@ async function runEscrowIndexerCycle({
 }
 
 function createEscrowIndexer(options = {}) {
+  /* istanbul ignore next -- default DB-backed wiring exercised in integration tests; unit tests inject store via DI. */
   const store = options.store || createKnexEscrowEventStore(options.db || db);
   const horizonBaseUrl = options.horizonBaseUrl || process.env.STELLAR_HORIZON_URL || 'https://horizon-testnet.stellar.org';
   const fetchEscrowEvents =
     options.fetchEscrowEvents ||
+    /* istanbul ignore next -- default Horizon fetch exercised in integration tests; unit tests inject fetchEscrowEvents via DI. */
     ((params) => fetchEscrowEventsFromHorizon({
       baseUrl: horizonBaseUrl,
       cursor: params.cursor,
@@ -222,6 +226,7 @@ function createEscrowIndexer(options = {}) {
     }));
   const transactionRunner =
     options.transactionRunner ||
+    /* istanbul ignore next -- default transaction runner exercised with knex; unit tests inject transactionRunner via DI. */
     ((handler) => (options.db || db).transaction(handler));
   const pollIntervalMs = Number(options.pollIntervalMs || process.env.ESCROW_INDEXER_POLL_INTERVAL_MS || DEFAULT_POLL_INTERVAL_MS);
 
