@@ -9,11 +9,10 @@ const express = require('express');
 const router = express.Router();
 const marketplaceService = require('../services/marketplaceService');
 const { validateMarketplaceQueryParams } = require('../utils/validators');
-const { authenticateToken } = require('../middleware/auth');
-const { extractTenant } = require('../middleware/tenant');
+const { authenticatedTenantStack } = require('../middleware/stacks');
 const logger = require('../logger');
 
-router.use(authenticateToken, extractTenant);
+router.use(...authenticatedTenantStack);
 
 /**
  * @swagger

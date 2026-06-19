@@ -19,7 +19,7 @@
 const express = require('express');
 const crypto = require('crypto');
 const asyncHandler = require('../utils/asyncHandler');
-const { requireAuth } = require('../middleware/auth');
+const { authenticatedTenantStack } = require('../middleware/stacks');
 const { requireKycForFunding } = require('../middleware/kycGating');
 const { resolveEscrowAddress, EscrowNotFoundError } = require('../config/escrowMap');
 const { submitFundEscrow, EscrowSubmitError } = require('../services/escrowSubmit');
@@ -32,11 +32,13 @@ const router = express.Router();
 const INVOICE_ID_RE = /^[a-zA-Z0-9_\-]{3,64}$/;
 const STELLAR_ADDRESS_RE = /^[CG][A-Z2-7]{55}$/;
 
-router.use(authenticateToken, extractTenant);
+router.use(...authenticatedTenantStack);
 
 /**
  * Validate fund-invoice request body.
  * Returns an array of human-readable error strings; empty array = valid.
+ * @param {object} body - Request body.
+ * @returns {string[]} Validation errors.
  */
 function validateFundInvoiceBody(body) {
   const errors = [];
@@ -68,7 +70,6 @@ function validateFundInvoiceBody(body) {
 
 router.get(
   '/opportunities',
-  requireAuth,
   asyncHandler(async (req, res) => {
     // Placeholder — replace with real marketplace query in a future issue
     res.json({
@@ -82,7 +83,6 @@ router.get(
 
 router.post(
   '/fund-invoice',
-  requireAuth,
   requireKycForFunding,
   asyncHandler(async (req, res) => {
     // 1. Input validation

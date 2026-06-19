@@ -400,7 +400,8 @@ tests/load/reports/
 │   │   ├── audit.js         # Immutable audit logging for mutations
 │   │   ├── deprecation.js   # API deprecation notices
 │   │   ├── errorHandler.js  # Centralized error handling
-│   │   └── rateLimit.js     # Rate limiting enforcement
+│   │   ├── rateLimit.js     # Rate limiting enforcement
+│   │   └── stacks.js        # Composed middleware stacks (authenticatedTenantStack, adminStack)
 │   ├── services/
 │   │   ├── invoiceService.js # Business logic and pagination
 │   │   └── soroban.js        # Contract interaction wrappers

@@ -14,9 +14,7 @@
 
 const express = require('express');
 const router = express.Router();
-const { authenticateToken } = require('../middleware/auth');
-const { apiKeyAuth } = require('../middleware/apiKey');
-const { extractTenant } = require('../middleware/tenant');
+const { adminStack } = require('../middleware/stacks');
 const { getInvoiceAuditTrail, countAuditLogs, exportInvoiceAuditLogs, getAuditLogs } = require('../services/auditLog');
 const { getTransitionHistory } = require('../services/invoiceStateMachine');
 const AppError = require('../errors/AppError');
@@ -24,18 +22,8 @@ const AppError = require('../errors/AppError');
 const MAX_LIMIT = 500;
 const DEFAULT_LIMIT = 50;
 
-/**
- * Accepts either a valid admin JWT or a valid API key.
- * @param {import('express').Request} req
- * @param {import('express').Response} res
- * @param {import('express').NextFunction} next
- */
-function adminAuth(req, res, next) {
-  if (req.headers['x-api-key']) {
-    return apiKeyAuth(req, res, next);
-  }
-  return authenticateToken(req, res, next);
-}
+// ── Middleware stack for all routes ──────────────────────────────────────────
+router.use(...adminStack);
 
 /**
  * Parse and clamp pagination params from query string.
@@ -56,9 +44,6 @@ function parsePagination(query) {
 function isValidInvoiceId(invoiceId) {
   return typeof invoiceId === 'string' && invoiceId.length > 0 && invoiceId.length <= 128;
 }
-
-// ── Middleware stack for all routes ──────────────────────────────────────────
-router.use(adminAuth, extractTenant);
 
 /**
  * GET /api/admin/audit/invoices/:invoiceId

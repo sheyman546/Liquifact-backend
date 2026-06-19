@@ -9,11 +9,54 @@ jest.mock('../src/services/health', () => ({
 
 jest.mock('../src/services/marketplaceService', () => ({
   getMarketplaceInvoices: jest.fn(),
+  PUBLIC_INVESTABLE_INVOICE_STATUSES: ['open', 'funded'],
 }));
 
 jest.mock('../src/config/escrowVersions', () => ({
   getOnChainSchemaVersion: jest.fn(),
   compareVersions: jest.fn(),
+}));
+
+jest.mock('../src/services/escrowRead', () => ({
+  readEscrowState: jest.fn(),
+  readEscrowStateWithAttestations: jest.fn(),
+  readFundedAmount: jest.fn(),
+  fetchLegalHold: jest.fn(),
+  fetchAttestationAppendLog: jest.fn(),
+  validateInvoiceId: jest.fn(),
+  getEscrowStateWithProjection: jest.fn(),
+}));
+
+jest.mock('../src/middleware/apiKey', () => ({
+  apiKeyAuth: jest.fn((req, res, next) => {
+    const err = new Error('Invalid API key');
+    err.status = 401;
+    next(err);
+  }),
+  hashApiKey: jest.fn((k) => k),
+  initDb: jest.fn(),
+}));
+
+jest.mock('../src/services/escrowSubmit', () => ({
+  submitFundEscrow: jest.fn(),
+  EscrowSubmitError: class EscrowSubmitError extends Error {},
+}));
+
+jest.mock('../src/services/investorCommitment', () => ({
+  persistCommitment: jest.fn(),
+}));
+
+jest.mock('../src/jobs/retentionPurge', () => ({
+  scheduleRetentionPurge: jest.fn(),
+  validatePiiFields: jest.fn(),
+  getActivePolicies: jest.fn(),
+  getEligibleInvoices: jest.fn(),
+  getExecutionStatus: jest.fn(),
+  getRecentExecutions: jest.fn(),
+}));
+
+jest.mock('../src/jobs/contractListRefresh', () => ({
+  runContractListRefresh: jest.fn(),
 }));
 
 jest.mock('../src/db/knex', () => {
@@ -25,6 +68,8 @@ jest.mock('../src/db/knex', () => {
       select: jest.fn(() => query),
       insert: jest.fn(() => query),
       update: jest.fn(() => query),
+      limit: jest.fn(() => query),
+      offset: jest.fn(() => query),
       returning: jest.fn(() => Promise.resolve(result)),
       first: jest.fn(() => Promise.resolve(Array.isArray(result) ? result[0] || null : result)),
       then: (resolve, reject) => Promise.resolve(result).then(resolve, reject),
@@ -41,19 +86,59 @@ const marketplaceService = require('../src/services/marketplaceService');
 const escrowVersions = require('../src/config/escrowVersions');
 const app = require('../src/app');
 
-function authHeader(payload = {}) {
-  const token = jwt.sign(
-    {
-      sub: 'user_1',
-      id: 'user_1',
-      tenantId: 'tenant_test',
-      ...payload,
-    },
-    process.env.JWT_SECRET || 'test-secret'
-  );
+const SECRET = process.env.JWT_SECRET || 'test-secret';
 
-  return `Bearer ${token}`;
+function makeToken(payload = {}) {
+  return jwt.sign(
+    { sub: 'user_1', id: 'user_1', tenantId: 'tenant_test', ...payload },
+    SECRET
+  );
 }
+
+function authHeader(payload = {}) {
+  return `Bearer ${makeToken(payload)}`;
+}
+
+// ─── Describe: shared stacks ─────────────────────────────────────────────────
+
+describe('authenticatedTenantStack', () => {
+  const { authenticatedTenantStack } = require('../src/middleware/stacks');
+
+  it('exports an array of two middleware functions', () => {
+    expect(Array.isArray(authenticatedTenantStack)).toBe(true);
+    expect(authenticatedTenantStack).toHaveLength(2);
+    expect(typeof authenticatedTenantStack[0]).toBe('function');
+    expect(typeof authenticatedTenantStack[1]).toBe('function');
+  });
+
+  it('first item is authenticateToken', () => {
+    const { authenticateToken } = require('../src/middleware/auth');
+    expect(authenticatedTenantStack[0]).toBe(authenticateToken);
+  });
+
+  it('second item is extractTenant', () => {
+    const { extractTenant } = require('../src/middleware/tenant');
+    expect(authenticatedTenantStack[1]).toBe(extractTenant);
+  });
+});
+
+describe('adminStack', () => {
+  const { adminStack } = require('../src/middleware/stacks');
+
+  it('exports an array of two middleware functions', () => {
+    expect(Array.isArray(adminStack)).toBe(true);
+    expect(adminStack).toHaveLength(2);
+    expect(typeof adminStack[0]).toBe('function');
+    expect(typeof adminStack[1]).toBe('function');
+  });
+
+  it('second item is extractTenant (ordering: auth before tenant)', () => {
+    const { extractTenant } = require('../src/middleware/tenant');
+    expect(adminStack[1]).toBe(extractTenant);
+  });
+});
+
+// ─── Describe: mounted routers ───────────────────────────────────────────────
 
 describe('Mounted feature routers', () => {
   beforeEach(() => {
@@ -151,5 +236,125 @@ describe('Mounted feature routers', () => {
     const res = await request(app).get('/v1/health');
 
     expect(res.status).not.toBe(404);
+  });
+});
+
+// ─── Describe: unauthenticated requests ──────────────────────────────────────
+
+describe('Unauthenticated requests are rejected', () => {
+  it('rejects GET /api/marketplace with 401', async () => {
+    const res = await request(app).get('/api/marketplace');
+    expect(res.status).toBe(401);
+  });
+
+  it('rejects GET /api/invest/opportunities with 401', async () => {
+    const res = await request(app).get('/api/invest/opportunities');
+    expect(res.status).toBe(401);
+  });
+
+  it('rejects GET /api/admin/escrow/version with 401', async () => {
+    const res = await request(app).get('/api/admin/escrow/version');
+    expect(res.status).toBe(401);
+  });
+
+  it('rejects GET /api/admin/audit/invoices/inv-1 with 401', async () => {
+    const res = await request(app).get('/api/admin/audit/invoices/inv-1');
+    expect(res.status).toBe(401);
+  });
+});
+
+// ─── Describe: missing tenant context ────────────────────────────────────────
+
+describe('Missing tenant context is rejected', () => {
+  it('returns 400 on /api/marketplace when JWT has no tenantId', async () => {
+    const tokenNoTenant = jwt.sign({ sub: 'user_1', id: 'user_1' }, SECRET);
+    const res = await request(app)
+      .get('/api/marketplace')
+      .set('Authorization', `Bearer ${tokenNoTenant}`);
+
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 400 on /api/invest/opportunities when JWT has no tenantId', async () => {
+    const tokenNoTenant = jwt.sign({ sub: 'user_1', id: 'user_1' }, SECRET);
+    const res = await request(app)
+      .get('/api/invest/opportunities')
+      .set('Authorization', `Bearer ${tokenNoTenant}`);
+
+    expect(res.status).toBe(400);
+  });
+});
+
+// ─── Describe: admin-only route via JWT ──────────────────────────────────────
+
+describe('Admin-only routes via JWT', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    escrowVersions.getOnChainSchemaVersion.mockResolvedValue(3);
+    escrowVersions.compareVersions.mockReturnValue({ status: 'current', knownVersion: '1.2.0' });
+  });
+
+  it('allows GET /api/admin/escrow/version with valid JWT', async () => {
+    const res = await request(app)
+      .get('/api/admin/escrow/version')
+      .set('Authorization', authHeader());
+
+    expect(res.status).not.toBe(401);
+    expect(res.status).not.toBe(404);
+  });
+
+  it('allows GET /api/admin/audit/invoices/:id with valid JWT', async () => {
+    const res = await request(app)
+      .get('/api/admin/audit/invoices/inv-001')
+      .set('Authorization', authHeader());
+
+    expect(res.status).not.toBe(401);
+    expect(res.status).not.toBe(404);
+  });
+});
+
+// ─── Describe: admin-only route via API key ───────────────────────────────────
+
+describe('Admin-only routes via API key', () => {
+  it('reaches auth check with x-api-key header on /api/admin/escrow/version', async () => {
+    // Without a valid DB-backed key the response is 401, but it is NOT 404 —
+    // confirming the adminStack is wired and the route is reachable.
+    const res = await request(app)
+      .get('/api/admin/escrow/version')
+      .set('x-api-key', 'any-key')
+      .set('x-tenant-id', 'tenant_test');
+
+    expect(res.status).not.toBe(404);
+  });
+
+  it('reaches auth check with x-api-key header on /api/admin/audit/invoices/:id', async () => {
+    const res = await request(app)
+      .get('/api/admin/audit/invoices/inv-001')
+      .set('x-api-key', 'any-key')
+      .set('x-tenant-id', 'tenant_test');
+
+    expect(res.status).not.toBe(404);
+  });
+});
+
+// ─── Describe: ordering guarantee — tenant context never set before auth ─────
+
+describe('Middleware ordering guarantee', () => {
+  it('authenticatedTenantStack: auth (index 0) runs before tenant (index 1)', () => {
+    const { authenticatedTenantStack } = require('../src/middleware/stacks');
+    const { authenticateToken } = require('../src/middleware/auth');
+    const { extractTenant } = require('../src/middleware/tenant');
+
+    expect(authenticatedTenantStack.indexOf(authenticateToken)).toBe(0);
+    expect(authenticatedTenantStack.indexOf(extractTenant)).toBe(1);
+  });
+
+  it('adminStack: auth (index 0) runs before tenant (index 1)', () => {
+    const { adminStack } = require('../src/middleware/stacks');
+    const { extractTenant } = require('../src/middleware/tenant');
+
+    expect(adminStack.indexOf(extractTenant)).toBe(1);
+    // The auth function at index 0 is the internal adminAuth combiner
+    expect(typeof adminStack[0]).toBe('function');
   });
 });

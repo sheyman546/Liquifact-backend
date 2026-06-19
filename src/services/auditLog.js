@@ -168,12 +168,14 @@ async function getAuditLogs({
   if (limit !== Infinity) {
     query = query.limit(limit).offset(offset);
   }
+
+  const rows = await query;
+  let filtered = rows.map(mapDbRowToAuditLog);
   if (tenantId) {
     filtered = filtered.filter((log) => log.metadata && log.metadata.tenantId === tenantId);
   }
 
-  const rows = await query;
-  return rows.map(mapDbRowToAuditLog);
+  return filtered;
 }
 
 /**

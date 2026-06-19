@@ -9,28 +9,19 @@
 
 const express = require('express');
 const router = express.Router();
-const { authenticateToken } = require('../middleware/auth');
-const { apiKeyAuth } = require('../middleware/apiKey');
+const { adminStack } = require('../middleware/stacks');
 const { runContractListRefresh } = require('../jobs/contractListRefresh');
 const { getOnChainSchemaVersion, compareVersions } = require('../config/escrowVersions');
 const AppError = require('../errors/AppError');
 const logger = require('../logger');
 
-/**
- * Accepts either a valid admin JWT or a valid API key.
- */
-function adminAuth(req, res, next) {
-  if (req.headers['x-api-key']) {
-    return apiKeyAuth(req, res, next);
-  }
-  return authenticateToken(req, res, next);
-}
+router.use(...adminStack);
 
 /**
  * POST /api/admin/escrow/refresh
  * Manually triggers the contract list refresh job.
  */
-router.post('/refresh', adminAuth, async (req, res, next) => {
+router.post('/refresh', async (req, res, next) => {
   try {
     const result = await runContractListRefresh();
     logger.info({ result, requestId: req.id }, 'Admin triggered contract list refresh');
@@ -63,7 +54,7 @@ router.post('/refresh', adminAuth, async (req, res, next) => {
  * GET /api/admin/escrow/version
  * Returns the current on-chain SCHEMA_VERSION and registry comparison.
  */
-router.get('/version', adminAuth, async (req, res, next) => {
+router.get('/version', async (req, res, next) => {
   try {
     const onChainVersion = await getOnChainSchemaVersion();
     const { status, knownVersion } = compareVersions(onChainVersion);
