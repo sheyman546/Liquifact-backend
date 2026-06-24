@@ -716,5 +716,113 @@ We welcome docs improvements, bug fixes, and new API endpoints aligned with Liqu
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for branch naming, local checks, testing expectations, CI behavior, and pull request guidance.
 
+---
+
+## Webhooks
+
+LiquiFact delivers signed webhook callbacks to tenant-configured endpoints whenever an invoice transitions between states (e.g. `pending → approved`, `approved → linked_escrow`).
+
+### How it works
+
+1. **State transition** — `invoiceStateMachine.executeTransition` completes successfully.
+2. **Job enqueue** — `enqueueWebhookDelivery` looks up the tenant's `webhook_url` / `webhook_secret` from the database and enqueues a `webhook_delivery` job via the shared `BackgroundWorker`.
+3. **Signed delivery** — the `webhookDelivery` job handler constructs a deterministically-sorted JSON payload, signs it with HMAC-SHA256 (`v1` scheme), and POSTs it with an `X-Signature` header.
+4. **Retry** — transient failures (network errors, HTTP 5xx) are retried with bounded exponential backoff. Non-retriable failures (HTTP 4xx) are not retried.
+5. **Dead-letter** — after exhausting all retry attempts the delivery is written to `webhook_dead_letters` and a Prometheus counter is incremented.
+
+### Signature verification
+
+Every webhook request carries an `X-Signature` header in the format:
+
+```
+t=<unix_timestamp>,v1=<hmac_sha256_hex>
+```
+
+To verify on the receiving end:
+
+1. Extract `t` (timestamp, seconds since epoch) and `v1` (hex signature) from the header.
+2. Reject if `|now_ms − t × 1000| > 300000` (5-minute tolerance window).
+3. Compute the expected signature:
+   ```
+   HMAC-SHA256(secret, "<t>.<raw_body>")
+   ```
+4. Compare using a **constant-time** function (e.g. `crypto.timingSafeEqual`) to prevent timing attacks.
+5. Reject if the signatures do not match.
+
+**Example (Node.js receiver):**
+
+```js
+const crypto = require('crypto');
+
+function verifyWebhook(secret, rawBody, signatureHeader) {
+  const parts = Object.fromEntries(
+    signatureHeader.split(',').map((p) => p.split('='))
+  );
+  const ts = parseInt(parts.t, 10);
+  if (Math.abs(Date.now() - ts * 1000) > 5 * 60 * 1000) {
+    return false; // replay / clock-skew rejected
+  }
+  const expected = crypto
+    .createHmac('sha256', secret)
+    .update(`${ts}.${rawBody}`)
+    .digest('hex');
+  return crypto.timingSafeEqual(
+    Buffer.from(parts.v1, 'hex'),
+    Buffer.from(expected, 'hex')
+  );
+}
+```
+
+### Payload shape
+
+```jsonc
+{
+  "event": "invoice.pending_to_approved",
+  "invoiceId": "inv_abc123",
+  "tenantId": "tenant_xyz",
+  "timestamp": "2025-01-15T12:00:00.000Z",
+  "transition": {
+    "actor": "usr_admin",
+    "from": "pending",
+    "reason": null,
+    "to": "approved",
+    "transitionedAt": "2025-01-15T12:00:00.000Z"
+  }
+}
+```
+
+Keys are always sorted alphabetically (deterministic) to simplify signature verification on any platform.
+
+### Environment variables
+
+| Variable              | Default | Description                                    |
+|-----------------------|---------|------------------------------------------------|
+| `WEBHOOK_MAX_RETRIES` | `3`     | Max retry attempts after the first failure     |
+| `WEBHOOK_BASE_DELAY`  | `500`   | Base exponential-backoff delay (ms)            |
+| `WEBHOOK_MAX_DELAY`   | `10000` | Maximum backoff delay cap (ms)                 |
+| `WEBHOOK_TIMEOUT_MS`  | `5000`  | Per-request HTTP timeout (ms)                  |
+
+### Tenant configuration
+
+Configure per-tenant webhook delivery by storing `webhook_url` and `webhook_secret` in the `tenants.settings` JSONB column:
+
+```sql
+UPDATE tenants
+SET settings = settings || '{"webhook_url":"https://your.endpoint/cb","webhook_secret":"<strong-random-secret>"}'
+WHERE id = 'your-tenant-id';
+```
+
+> **Security**: Generate `webhook_secret` with at least 32 bytes of cryptographic randomness (e.g. `openssl rand -hex 32`). Rotate secrets by updating the column — in-flight jobs will fail safe and dead-letter, then delivery resumes automatically on the next enqueue.
+
+### Security notes
+
+- Secrets and full target URLs are **never** logged at `info` level.
+- Signature comparison uses `crypto.timingSafeEqual` — no timing side-channels.
+- The 5-minute timestamp tolerance prevents replay attacks.
+- Webhook delivery failures never affect the outcome of a state transition.
+- Dead-lettered deliveries are stored in `webhook_dead_letters` for ops inspection.
+
+---
+
 ## License
 MIT (see root LiquiFact project for full license).

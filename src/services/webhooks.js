@@ -5,6 +5,23 @@ const db = require('../db/knex');
 const logger = require('../logger');
 const { withRetry } = require('../utils/retry');
 const { appendAuditEvent } = require('./auditLogStore');
+
+// Lazily-resolved shared worker to avoid circular dependency at module load time.
+// Set via setSharedWorker() by the application bootstrap or tests.
+let _sharedWorker = null;
+
+/**
+ * Injects the BackgroundWorker instance used by enqueueWebhookDelivery.
+ * Call this once at application startup (src/index.js) after the worker has
+ * been created and the 'webhook_delivery' handler has been registered.
+ *
+ * @param {import('../workers/worker')} worker - Configured BackgroundWorker.
+ * @returns {void}
+ */
+function setSharedWorker(worker) {
+  _sharedWorker = worker;
+}
+
 let client;
 try {
   client = require('prom-client');
@@ -281,11 +298,89 @@ function verifySignature(secret, rawBody, signatureHeader, toleranceMs = TOLERAN
   return { valid, error: valid ? null : 'Signature mismatch' };
 }
 
+/**
+ * Enqueues a `webhook_delivery` job for a successful invoice state transition.
+ *
+ * The function looks up the tenant's webhook configuration from the database;
+ * if no URL or secret is configured it returns silently. The job payload
+ * includes the transition metadata so that the signed outbound request can be
+ * composed by the worker without an additional DB round-trip.
+ *
+ * Secrets and full target URLs are **never** logged at info level.
+ *
+ * @param {Object} options - Enqueue options.
+ * @param {string} options.invoiceId    - Invoice that transitioned.
+ * @param {string} options.event        - Event type label (e.g. `'invoice.approved'`).
+ * @param {Object} options.transition   - Transition metadata.
+ * @param {string} options.transition.from          - Previous state.
+ * @param {string} options.transition.to            - New state.
+ * @param {string} options.transition.actor         - Who triggered the transition.
+ * @param {string|null} [options.transition.reason] - Optional reason.
+ * @param {string} options.transition.transitionedAt - ISO timestamp.
+ * @returns {Promise<string|null>} The enqueued job ID, or null if skipped.
+ */
+async function enqueueWebhookDelivery({ invoiceId, event, transition }) {
+  if (!_sharedWorker) {
+    // Worker not yet initialised (e.g. during unit tests that only test
+    // signature helpers). Log at debug level and bail out.
+    logger.info({ invoiceId, event }, 'webhook: shared worker not set, skipping enqueue');
+    return null;
+  }
+
+  try {
+    const invoice = await db('invoices').select('tenant_id').where('id', invoiceId).first();
+    if (!invoice) {
+      logger.warn({ invoiceId }, 'webhook: invoice not found, skipping enqueue');
+      return null;
+    }
+
+    const { tenant_id: tenantId } = invoice;
+
+    const tenant = await db('tenants').select('settings').where('id', tenantId).first();
+    if (!tenant || !tenant.settings) {
+      logger.warn({ tenantId, invoiceId }, 'webhook: tenant settings not found, skipping enqueue');
+      return null;
+    }
+
+    const { webhook_url: webhookUrl, webhook_secret: webhookSecret } = tenant.settings;
+    if (!webhookUrl || !webhookSecret) {
+      // Not configured — this is expected; log at info, not warn.
+      logger.info({ tenantId, invoiceId }, 'webhook: URL or secret not configured, skipping enqueue');
+      return null;
+    }
+
+    const jobId = _sharedWorker.enqueue('webhook_delivery', {
+      invoiceId,
+      tenantId,
+      webhookUrl,
+      webhookSecret,
+      event,
+      transition,
+    });
+
+    logger.info(
+      { invoiceId, tenantId, event, jobId },
+      'webhook: delivery job enqueued'
+    );
+
+    return jobId;
+  } catch (err) {
+    logger.error(
+      { invoiceId, event, error: err && err.message ? err.message : String(err) },
+      'webhook: failed to enqueue delivery job'
+    );
+    return null;
+  }
+}
+
 module.exports = {
   emitWebhook,
   verifySignature,
   createSignature,
   createSignatureHeader,
+  sortKeys,
+  setSharedWorker,
+  enqueueWebhookDelivery,
   SIGNATURE_VERSION,
   TOLERANCE_MS,
 };

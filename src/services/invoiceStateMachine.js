@@ -8,6 +8,8 @@
 
 const { createAuditLog } = require('./auditLog');
 const logger = require('../logger');
+const { enqueueWebhookDelivery } = require('./webhooks');
+
 
 /**
  * Valid invoice states in the lifecycle
@@ -294,7 +296,7 @@ async function executeTransition({
     auditLogId: auditLog.id,
   }, 'Invoice state transition executed');
 
-  return {
+  const result = {
     success: true,
     previousState: currentState,
     newState: targetState,
@@ -302,6 +304,27 @@ async function executeTransition({
     transitionedAt: auditLog.timestamp,
     transitionedBy: actor,
   };
+
+  // Enqueue a signed webhook delivery job for this transition.
+  // This is fire-and-forget: webhook errors must never fail the transition.
+  enqueueWebhookDelivery({
+    invoiceId,
+    event: `invoice.${currentState}_to_${targetState}`,
+    transition: {
+      from: currentState,
+      to: targetState,
+      actor,
+      reason: normalizedReason,
+      transitionedAt: auditLog.timestamp,
+    },
+  }).catch((err) => {
+    logger.error(
+      { invoiceId, error: err && err.message ? err.message : String(err) },
+      'Failed to enqueue webhook delivery after state transition'
+    );
+  });
+
+  return result;
 }
 
 /**
