@@ -102,9 +102,18 @@ function validateInvoiceQueryParams(query) {
 
 /**
  * Validates marketplace query parameters.
- * 
+ *
+ * Supports both legacy offset pagination (`page` + `limit`) and cursor-based
+ * pagination (`cursor` + `limit`).  When `cursor` is supplied, `page` is
+ * ignored — the cursor encodes the exact position in the result set.
+ *
+ * The `cursor` value is treated as an opaque string here; structural
+ * validation (HMAC signature, sort-field match) is deferred to
+ * `src/utils/cursorPagination.js` so that a single, clear 400 is returned
+ * from the route layer.
+ *
  * @param {Object} query - The Express query object.
- * @returns {Object} { isValid, errors, validatedParams }
+ * @returns {{ isValid: boolean, errors: string[], validatedParams: Object }}
  */
 function validateMarketplaceQueryParams(query) {
   const errors = [];
@@ -125,7 +134,8 @@ function validateMarketplaceQueryParams(query) {
     sortBy,
     order,
     page,
-    limit
+    limit,
+    cursor
   } = query;
 
   // Validate status
