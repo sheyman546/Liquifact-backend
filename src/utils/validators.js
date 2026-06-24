@@ -103,9 +103,18 @@ function validateInvoiceQueryParams(query) {
 // ── Marketplace query-param validator ────────────────────────────────────────
 
 /**
- * Validates `GET /api/marketplace` query parameters.
+ * Validates marketplace query parameters.
  *
- * @param {Object} query - The Express `req.query` object.
+ * Supports both legacy offset pagination (`page` + `limit`) and cursor-based
+ * pagination (`cursor` + `limit`).  When `cursor` is supplied, `page` is
+ * ignored — the cursor encodes the exact position in the result set.
+ *
+ * The `cursor` value is treated as an opaque string here; structural
+ * validation (HMAC signature, sort-field match) is deferred to
+ * `src/utils/cursorPagination.js` so that a single, clear 400 is returned
+ * from the route layer.
+ *
+ * @param {Object} query - The Express query object.
  * @returns {{ isValid: boolean, errors: string[], validatedParams: Object }}
  */
 function validateMarketplaceQueryParams(query) {
@@ -114,10 +123,17 @@ function validateMarketplaceQueryParams(query) {
 
   const {
     status,
-    yieldBpsMin, yieldBpsMax,
-    maturityDateFrom, maturityDateTo,
-    fundedRatioMin, fundedRatioMax,
-    sortBy, order, page, limit,
+    yieldBpsMin,
+    yieldBpsMax,
+    maturityDateFrom,
+    maturityDateTo,
+    fundedRatioMin,
+    fundedRatioMax,
+    sortBy,
+    order,
+    page,
+    limit,
+    cursor
   } = query;
 
   if (status !== undefined) {
@@ -179,10 +195,23 @@ function validateMarketplaceQueryParams(query) {
     else { errors.push('Invalid order. Must be "asc" or "desc"'); }
   }
 
-  if (page !== undefined) {
-    const val = parseInt(page, 10);
-    if (!isNaN(val) && val >= 1) { validatedParams.pagination.page = val; }
-    else { errors.push('page must be an integer >= 1'); }
+  // Validate cursor (opaque base64url.signature string)
+  if (cursor !== undefined) {
+    if (typeof cursor === 'string' && cursor.length > 0 && cursor.length <= 2048) {
+      validatedParams.pagination.cursor = cursor;
+    } else {
+      errors.push('cursor must be a non-empty string (max 2048 chars)');
+    }
+  }
+
+  // Validate pagination — page is ignored when a cursor is present
+  if (cursor === undefined && page !== undefined) {
+    const val = parseInt(page);
+    if (!isNaN(val) && val >= 1) {
+      validatedParams.pagination.page = val;
+    } else {
+      errors.push('page must be an integer >= 1');
+    }
   }
   if (limit !== undefined) {
     const val = parseInt(limit, 10);

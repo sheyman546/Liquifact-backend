@@ -196,12 +196,37 @@ The API is documented using OpenAPI 3.0 specification.
 
 The documentation covers all public endpoints including health checks, invoice management, escrow operations, and investment opportunities.
 
-- **Marketplace**: `GET /api/marketplace` - Search and sort invoices by yield, maturity, and funded ratio. Supports advanced filtering (`yieldBpsMin`, `maturityDateTo`, `fundedRatioMin`, etc.) and pagination.
+- **Marketplace**: `GET /api/marketplace` - Search and sort invoices by yield, maturity, and funded ratio. Supports advanced filtering (`yieldBpsMin`, `maturityDateTo`, `fundedRatioMin`, etc.) and both **cursor-based** and offset pagination.
 
-**Example:**
+  **Cursor pagination (recommended)** — stable under inserts/deletes; use the `nextCursor` value from one response as the `cursor` param in the next request. Cursors are opaque and HMAC-signed; any modification returns 400.
+
+  **Offset pagination (legacy)** — use `page` + `limit` as before. `nextCursor` and `hasMore` are also returned so clients can migrate incrementally.
+
+  | Param | Mode | Description |
+  |---|---|---|
+  | `cursor` | Cursor | Opaque cursor from previous `nextCursor`; invalidates `page` |
+  | `limit` | Both | Page size (1–100, default 10) |
+  | `page` | Offset | 1-based page number (ignored when `cursor` present) |
+  | `sortBy` | Both | `yield_bps` \| `maturity_date` \| `funded_ratio` \| `amount` \| `created_at` |
+  | `order` | Both | `asc` \| `desc` (must be consistent across pages in cursor mode) |
+
+**Example — first page (cursor mode):**
 ```bash
 curl -H "Authorization: Bearer <token>" \
-     "http://localhost:3001/api/marketplace?yieldBpsMin=500&sortBy=yield_bps&order=desc"
+     "http://localhost:3001/api/marketplace?sortBy=yield_bps&order=desc&limit=10"
+# Response meta: { total, limit, hasMore, nextCursor }
+```
+
+**Example — next page:**
+```bash
+curl -H "Authorization: Bearer <token>" \
+     "http://localhost:3001/api/marketplace?sortBy=yield_bps&order=desc&limit=10&cursor=<nextCursor>"
+```
+
+**Example — with filters (offset mode):**
+```bash
+curl -H "Authorization: Bearer <token>" \
+     "http://localhost:3001/api/marketplace?yieldBpsMin=500&sortBy=yield_bps&order=desc&page=2&limit=10"
 ```
 
 ---
