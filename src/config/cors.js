@@ -104,6 +104,56 @@ function resolveAllowlist(env = process.env) {
 }
 
 /**
+ * Normalizes a browser origin string for allowlist comparison.
+ *
+ * Rules applied:
+ * 1. Lowercases the scheme and host (RFC 6454 §6.1 — origins are
+ *    case-insensitive in scheme/host).
+ * 2. Strips a single trailing slash so that `https://app.example.com/`
+ *    and `https://app.example.com` compare equal.
+ *
+ * Returns `null` for the literal string `"null"` (sandboxed-iframe origin)
+ * and for any value that is not a non-empty string.
+ *
+ * @param {unknown} origin - Raw origin value from the request header.
+ * @returns {string|null} Normalized origin, or `null` when it cannot be
+ *   mapped to a valid origin string.
+ */
+function normalizeOrigin(origin) {
+  if (typeof origin !== 'string' || origin === '') { return null; }
+  // The literal string "null" comes from sandboxed iframes / data-URI
+  // navigations and must never be treated as an allowed origin.
+  if (origin === 'null') { return null; }
+
+  try {
+    const url = new URL(origin);
+    // Reconstruct origin from parsed URL to normalise scheme+host case and
+    // strip the trailing slash that URL.prototype.origin never includes.
+    return url.origin; // already lower-cased by the URL parser
+  } catch {
+    // Not a parseable URL — treat as unrecognised and deny.
+    return null;
+  }
+}
+
+/**
+ * Returns `true` when `origin` is in the `allowlist` after both sides are
+ * normalized via {@link normalizeOrigin}.
+ *
+ * The literal string `"null"` and any un-parseable origin always return
+ * `false`.
+ *
+ * @param {string} origin - Incoming request origin.
+ * @param {string[]} allowlist - Array of trusted origins.
+ * @returns {boolean}
+ */
+function isAllowedOrigin(origin, allowlist) {
+  const normalized = normalizeOrigin(origin);
+  if (normalized === null) { return false; }
+  return allowlist.some((entry) => normalizeOrigin(entry) === normalized);
+}
+
+/**
  * Sentinel error thrown when an incoming `Origin` is not on the allowlist.
  * The `isCorsOriginRejected` flag lets downstream error handlers identify it
  * without `instanceof` checks across module boundaries.
@@ -242,6 +292,12 @@ function createCorsOptions(env = process.env) {
       /**
        * Validates request origin against the mutable module-level allowlist.
        *
+       * - `undefined` (no Origin header): always passed — non-browser clients.
+       * - `"null"` (sandboxed iframe): always rejected.
+       * - Otherwise: normalized comparison against the allowlist.
+       *   Only an explicitly listed origin receives `Allow-Origin`; arbitrary
+       *   origins are never reflected together with credentials.
+       *
        * @param {string|undefined} origin - The request origin header value.
        * @param {Function} callback - CORS callback (err, allow).
        * @returns {void}
@@ -251,15 +307,11 @@ function createCorsOptions(env = process.env) {
           return callback(null, true);
         }
 
-        if (allowedOrigins.length === 0) {
+        if (allowedOrigins.length === 0 || !isAllowedOrigin(origin, allowedOrigins)) {
           return callback(createCorsRejectionError(origin));
         }
 
-        if (allowedOrigins.includes(origin)) {
-          return callback(null, true);
-        }
-
-        return callback(createCorsRejectionError(origin));
+        return callback(null, true);
       },
 
       maxAge,
@@ -275,6 +327,12 @@ function createCorsOptions(env = process.env) {
     /**
      * Validates request origin against the test-specific allowlist.
      *
+     * - `undefined` (no Origin header): always passed — non-browser clients.
+     * - `"null"` (sandboxed iframe): always rejected.
+     * - Otherwise: normalized comparison against the allowlist.
+     *   Only an explicitly listed origin receives `Allow-Origin`; arbitrary
+     *   origins are never reflected together with credentials.
+     *
      * @param {string|undefined} origin - The request origin header value.
      * @param {Function} callback - CORS callback (err, allow).
      * @returns {void}
@@ -284,15 +342,11 @@ function createCorsOptions(env = process.env) {
         return callback(null, true);
       }
 
-      if (testAllowlist.length === 0) {
+      if (testAllowlist.length === 0 || !isAllowedOrigin(origin, testAllowlist)) {
         return callback(createCorsRejectionError(origin));
       }
 
-      if (testAllowlist.includes(origin)) {
-        return callback(null, true);
-      }
-
-      return callback(createCorsRejectionError(origin));
+      return callback(null, true);
     },
 
     maxAge,
@@ -308,7 +362,9 @@ module.exports = {
   getAllowedOriginsFromEnv,
   getDevelopmentFallbackOrigins,
   getMaxAge,
+  isAllowedOrigin,
   isCorsOriginRejectedError,
+  normalizeOrigin,
   parseAllowedOrigins,
   parseMaxAge,
   reloadCorsOrigins,

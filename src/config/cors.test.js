@@ -667,7 +667,9 @@ describe('CORS configuration module', () => {
         expect(cors).toHaveProperty('getAllowedOriginsFromEnv');
         expect(cors).toHaveProperty('getDevelopmentFallbackOrigins');
         expect(cors).toHaveProperty('getMaxAge');
+        expect(cors).toHaveProperty('isAllowedOrigin');
         expect(cors).toHaveProperty('isCorsOriginRejectedError');
+        expect(cors).toHaveProperty('normalizeOrigin');
         expect(cors).toHaveProperty('parseAllowedOrigins');
         expect(cors).toHaveProperty('parseMaxAge');
         expect(cors).toHaveProperty('reloadCorsOrigins');
@@ -746,6 +748,206 @@ describe('CORS configuration module', () => {
         const cb = jest.fn();
         opts.origin('http://a.com', cb);
         expect(isCorsOriginRejectedError(cb.mock.calls[0][0])).toBe(true);
+      });
+    });
+  });
+
+  // ─── normalizeOrigin ─────────────────────────────────────────────────────
+
+  describe('normalizeOrigin', () => {
+    it('returns null for the literal string "null" (sandboxed iframe)', () => {
+      jest.isolateModules(() => {
+        const { normalizeOrigin } = require('./cors');
+        expect(normalizeOrigin('null')).toBeNull();
+      });
+    });
+
+    it('returns null for undefined', () => {
+      jest.isolateModules(() => {
+        const { normalizeOrigin } = require('./cors');
+        expect(normalizeOrigin(undefined)).toBeNull();
+      });
+    });
+
+    it('returns null for empty string', () => {
+      jest.isolateModules(() => {
+        const { normalizeOrigin } = require('./cors');
+        expect(normalizeOrigin('')).toBeNull();
+      });
+    });
+
+    it('returns null for a non-parseable string', () => {
+      jest.isolateModules(() => {
+        const { normalizeOrigin } = require('./cors');
+        expect(normalizeOrigin('not-a-url')).toBeNull();
+      });
+    });
+
+    it('lowercases scheme and host', () => {
+      jest.isolateModules(() => {
+        const { normalizeOrigin } = require('./cors');
+        expect(normalizeOrigin('HTTPS://APP.EXAMPLE.COM')).toBe('https://app.example.com');
+      });
+    });
+
+    it('strips a trailing slash', () => {
+      jest.isolateModules(() => {
+        const { normalizeOrigin } = require('./cors');
+        expect(normalizeOrigin('https://app.example.com/')).toBe('https://app.example.com');
+      });
+    });
+
+    it('preserves a non-default port', () => {
+      jest.isolateModules(() => {
+        const { normalizeOrigin } = require('./cors');
+        expect(normalizeOrigin('http://localhost:3000')).toBe('http://localhost:3000');
+      });
+    });
+
+    it('returns the same value for an already-normalized origin', () => {
+      jest.isolateModules(() => {
+        const { normalizeOrigin } = require('./cors');
+        expect(normalizeOrigin('https://app.example.com')).toBe('https://app.example.com');
+      });
+    });
+  });
+
+  // ─── isAllowedOrigin ──────────────────────────────────────────────────────
+
+  describe('isAllowedOrigin', () => {
+    it('returns true for an exact-match allowlisted origin', () => {
+      jest.isolateModules(() => {
+        const { isAllowedOrigin } = require('./cors');
+        expect(isAllowedOrigin('https://app.example.com', ['https://app.example.com'])).toBe(true);
+      });
+    });
+
+    it('returns false for the literal "null" origin', () => {
+      jest.isolateModules(() => {
+        const { isAllowedOrigin } = require('./cors');
+        expect(isAllowedOrigin('null', ['https://app.example.com', 'null'])).toBe(false);
+      });
+    });
+
+    it('matches a trailing-slash variant against a clean allowlist entry', () => {
+      jest.isolateModules(() => {
+        const { isAllowedOrigin } = require('./cors');
+        expect(isAllowedOrigin('https://app.example.com/', ['https://app.example.com'])).toBe(true);
+      });
+    });
+
+    it('matches an upper-case variant against a lower-case allowlist entry', () => {
+      jest.isolateModules(() => {
+        const { isAllowedOrigin } = require('./cors');
+        expect(isAllowedOrigin('HTTPS://APP.EXAMPLE.COM', ['https://app.example.com'])).toBe(true);
+      });
+    });
+
+    it('returns false for an origin not in the allowlist', () => {
+      jest.isolateModules(() => {
+        const { isAllowedOrigin } = require('./cors');
+        expect(isAllowedOrigin('https://evil.com', ['https://app.example.com'])).toBe(false);
+      });
+    });
+
+    it('returns false for an empty allowlist', () => {
+      jest.isolateModules(() => {
+        const { isAllowedOrigin } = require('./cors');
+        expect(isAllowedOrigin('https://app.example.com', [])).toBe(false);
+      });
+    });
+  });
+
+  // ─── Origin bypass hardening (integration via createCorsOptions) ──────────
+
+  describe('origin bypass hardening', () => {
+    it('rejects the literal "null" origin (sandboxed iframe)', () => {
+      jest.isolateModules(() => {
+        process.env.CORS_ORIGINS = 'https://app.example.com';
+        const { createCorsOptions, isCorsOriginRejectedError } = require('./cors');
+        const cb = jest.fn();
+        createCorsOptions().origin('null', cb);
+        expect(isCorsOriginRejectedError(cb.mock.calls[0][0])).toBe(true);
+      });
+    });
+
+    it('allows a trailing-slash variant of an allowlisted origin', () => {
+      jest.isolateModules(() => {
+        process.env.CORS_ORIGINS = 'https://app.example.com';
+        const { createCorsOptions } = require('./cors');
+        const cb = jest.fn();
+        createCorsOptions().origin('https://app.example.com/', cb);
+        expect(cb).toHaveBeenCalledWith(null, true);
+      });
+    });
+
+    it('allows an upper-case variant of an allowlisted origin', () => {
+      jest.isolateModules(() => {
+        process.env.CORS_ORIGINS = 'https://app.example.com';
+        const { createCorsOptions } = require('./cors');
+        const cb = jest.fn();
+        createCorsOptions().origin('HTTPS://APP.EXAMPLE.COM', cb);
+        expect(cb).toHaveBeenCalledWith(null, true);
+      });
+    });
+
+    it('allows a combined upper-case + trailing-slash variant', () => {
+      jest.isolateModules(() => {
+        process.env.CORS_ORIGINS = 'https://app.example.com';
+        const { createCorsOptions } = require('./cors');
+        const cb = jest.fn();
+        createCorsOptions().origin('HTTPS://APP.EXAMPLE.COM/', cb);
+        expect(cb).toHaveBeenCalledWith(null, true);
+      });
+    });
+
+    it('does not allow an unlisted origin (no credentialed reflection)', () => {
+      jest.isolateModules(() => {
+        process.env.CORS_ORIGINS = 'https://app.example.com';
+        const { createCorsOptions, isCorsOriginRejectedError } = require('./cors');
+        const cb = jest.fn();
+        createCorsOptions().origin('https://attacker.example.com', cb);
+        expect(isCorsOriginRejectedError(cb.mock.calls[0][0])).toBe(true);
+      });
+    });
+
+    it('rejects "null" even when the allowlist is the dev fallback', () => {
+      jest.isolateModules(() => {
+        process.env.NODE_ENV = 'development';
+        const { createCorsOptions, isCorsOriginRejectedError } = require('./cors');
+        const cb = jest.fn();
+        createCorsOptions().origin('null', cb);
+        expect(isCorsOriginRejectedError(cb.mock.calls[0][0])).toBe(true);
+      });
+    });
+
+    it('passes through requests with no Origin header (undefined) with hardening active', () => {
+      jest.isolateModules(() => {
+        process.env.CORS_ORIGINS = 'https://app.example.com';
+        const { createCorsOptions } = require('./cors');
+        const cb = jest.fn();
+        createCorsOptions().origin(undefined, cb);
+        expect(cb).toHaveBeenCalledWith(null, true);
+      });
+    });
+
+    it('hardens null-origin in the custom-env (test) path', () => {
+      jest.isolateModules(() => {
+        const { createCorsOptions, isCorsOriginRejectedError } = require('./cors');
+        const opts = createCorsOptions({ NODE_ENV: 'production', CORS_ORIGINS: 'https://app.example.com' });
+        const cb = jest.fn();
+        opts.origin('null', cb);
+        expect(isCorsOriginRejectedError(cb.mock.calls[0][0])).toBe(true);
+      });
+    });
+
+    it('allows trailing-slash variant in the custom-env path', () => {
+      jest.isolateModules(() => {
+        const { createCorsOptions } = require('./cors');
+        const opts = createCorsOptions({ NODE_ENV: 'production', CORS_ORIGINS: 'https://app.example.com' });
+        const cb = jest.fn();
+        opts.origin('https://app.example.com/', cb);
+        expect(cb).toHaveBeenCalledWith(null, true);
       });
     });
   });
