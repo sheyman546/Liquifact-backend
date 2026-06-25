@@ -14,6 +14,46 @@
 
 const JobQueue = require('./jobQueue');
 const logger = require('../logger');
+const { redactValue } = require('../services/auditLogStore');
+
+/** Safe payload keys surfaced in error logs (never secrets or full payloads). */
+const CONTEXT_KEYS = ['tenantId', 'invoiceId', 'correlationId', 'webhookUrl'];
+
+/**
+ * Builds a redacted log-safe context object from a job.
+ *
+ * Extracts a known-safe subset of payload fields and passes them through
+ * {@link redactValue} so any accidentally-sensitive value is scrubbed before
+ * it reaches the log sink.
+ *
+ * @param {Object} job - The job being processed.
+ * @param {string} job.id - Unique job identifier.
+ * @param {string} job.type - Registered job type.
+ * @param {number} job.attempts - Number of processing attempts so far.
+ * @param {Object} [job.payload] - Arbitrary job payload (not logged wholesale).
+ * @returns {{jobId: string, jobType: string, attempt: number, [key: string]: *}}
+ *   Redacted context safe for structured logging.
+ */
+function buildJobContext(job) {
+  const base = {
+    jobId: job.id,
+    jobType: job.type,
+    attempt: job.attempts,
+  };
+
+  if (!job.payload || typeof job.payload !== 'object') {
+    return base;
+  }
+
+  const picked = {};
+  for (const key of CONTEXT_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(job.payload, key)) {
+      picked[key] = job.payload[key];
+    }
+  }
+
+  return Object.assign(base, redactValue(picked));
+}
 
 /**
  * Background worker that processes queued jobs
@@ -230,6 +270,11 @@ class BackgroundWorker {
       // Job succeeded
       this.jobQueue.ack(job.id);
     } catch (err) {
+      // Log with structured, redacted context so operators can trace failures.
+      logger.error(
+        { err, ...buildJobContext(job) },
+        'Job handler failed'
+      );
       // Job failed, attempt retry
       this.jobQueue.retry(job.id, err);
     } finally {
@@ -239,3 +284,4 @@ class BackgroundWorker {
 }
 
 module.exports = BackgroundWorker;
+module.exports.buildJobContext = buildJobContext;

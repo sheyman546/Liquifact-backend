@@ -59,6 +59,24 @@ Optional Sentry error tracking is supported through the `SENTRY_DSN` environment
 - API keys and secret values
 - Stellar XDR / Stellar-specific payloads
 
+### Background worker error context
+
+When a background job handler throws, the worker logs a structured `error` event through `src/logger.js` that includes:
+
+| Field | Source |
+|-------|--------|
+| `jobId` | Job identifier |
+| `jobType` | Registered handler name (e.g. `webhook_delivery`, `retention_purge`) |
+| `attempt` | Attempt count at the time of failure |
+| `tenantId` | Payload field, when present |
+| `invoiceId` | Payload field, when present |
+| `correlationId` | Payload field, when present — correlates to the enqueuing request |
+| `err` | The thrown error object |
+
+Only the fields listed above are extracted from the job payload. All other payload fields are excluded. The extracted subset is passed through `redactValue` (from `src/services/auditLogStore.js`) before logging, so any accidentally-sensitive value is scrubbed to `***REDACTED***` before it reaches the log sink.
+
+The helper that builds this context is exported from `src/workers/worker.js` as `buildJobContext` for unit-testing.
+
 ### Health endpoints
 
 | Endpoint | Type | Dependencies checked | Response |

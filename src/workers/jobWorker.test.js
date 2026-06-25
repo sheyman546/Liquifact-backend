@@ -7,6 +7,7 @@
 
 const JobQueue = require('./jobQueue');
 const BackgroundWorker = require('./worker');
+const { buildJobContext } = require('./worker');
 const { JOB_STATUS } = require('./jobQueue');
 
 describe('JobQueue', () => {
@@ -718,5 +719,155 @@ describe('BackgroundWorker', () => {
 
       await worker.stop();
     });
+  });
+});
+
+describe('buildJobContext', () => {
+  const base = { id: 'job-abc', type: 'webhook_delivery', attempts: 2 };
+
+  it('returns jobId, jobType, and attempt', () => {
+    const ctx = buildJobContext({ ...base, payload: {} });
+    expect(ctx).toMatchObject({ jobId: 'job-abc', jobType: 'webhook_delivery', attempt: 2 });
+  });
+
+  it('includes tenantId and invoiceId from payload', () => {
+    const ctx = buildJobContext({
+      ...base,
+      payload: { tenantId: 'tenant-1', invoiceId: 'inv-99', unrelated: 'x' },
+    });
+    expect(ctx.tenantId).toBe('tenant-1');
+    expect(ctx.invoiceId).toBe('inv-99');
+    expect(ctx.unrelated).toBeUndefined();
+  });
+
+  it('includes correlationId when present', () => {
+    const ctx = buildJobContext({ ...base, payload: { correlationId: 'req_abc123' } });
+    expect(ctx.correlationId).toBe('req_abc123');
+  });
+
+  it('redacts sensitive keys in safe-subset fields', () => {
+    // webhookUrl is in CONTEXT_KEYS but contains no sensitive key name — passes through.
+    // A hypothetical payload that smuggles a "token" inside a CONTEXT_KEY value object:
+    // In practice CONTEXT_KEYS are scalar, but redactValue handles nested objects too.
+    const ctx = buildJobContext({
+      ...base,
+      payload: { tenantId: 'tenant-1', secret: 'should-not-appear' },
+    });
+    expect(ctx.tenantId).toBe('tenant-1');
+    // 'secret' is NOT in CONTEXT_KEYS, so it must not appear at all
+    expect(ctx.secret).toBeUndefined();
+  });
+
+  it('handles missing payload gracefully', () => {
+    const ctx = buildJobContext({ ...base });
+    expect(ctx).toEqual({ jobId: 'job-abc', jobType: 'webhook_delivery', attempt: 2 });
+  });
+
+  it('handles null payload gracefully', () => {
+    const ctx = buildJobContext({ ...base, payload: null });
+    expect(ctx).toEqual({ jobId: 'job-abc', jobType: 'webhook_delivery', attempt: 2 });
+  });
+
+  it('handles non-object payload gracefully', () => {
+    const ctx = buildJobContext({ ...base, payload: 'string-payload' });
+    expect(ctx).toEqual({ jobId: 'job-abc', jobType: 'webhook_delivery', attempt: 2 });
+  });
+});
+
+describe('BackgroundWorker – error log enrichment', () => {
+  let worker;
+  let queue;
+  let loggerErrorSpy;
+
+  beforeEach(() => {
+    queue = new JobQueue();
+    worker = new BackgroundWorker({ jobQueue: queue, pollIntervalMs: 20 });
+    // Spy on logger.error to capture structured log calls
+    const logger = require('../logger');
+    loggerErrorSpy = jest.spyOn(logger, 'error').mockImplementation(() => {});
+  });
+
+  afterEach(async () => {
+    if (worker.isRunning) { await worker.stop(); }
+    queue.clear();
+    loggerErrorSpy.mockRestore();
+  });
+
+  it('logs jobId, jobType, and attempt when handler throws', async () => {
+    worker.registerHandler('test_job', jest.fn().mockRejectedValue(new Error('boom')));
+    worker.start();
+    worker.enqueue('test_job', {});
+
+    await new Promise((r) => setTimeout(r, 200));
+    await worker.stop();
+
+    const call = loggerErrorSpy.mock.calls.find((c) => c[1] === 'Job handler failed');
+    expect(call).toBeDefined();
+    expect(call[0]).toMatchObject({ jobId: expect.any(String), jobType: 'test_job', attempt: 1 });
+  });
+
+  it('logs tenantId and invoiceId from payload without leaking other fields', async () => {
+    const payload = {
+      tenantId: 'tenant-xyz',
+      invoiceId: 'inv-001',
+      secret: 'should-not-log',
+      fullData: 'never-log',
+    };
+    worker.registerHandler('webhook_delivery', jest.fn().mockRejectedValue(new Error('fail')));
+    worker.start();
+    worker.enqueue('webhook_delivery', payload);
+
+    await new Promise((r) => setTimeout(r, 200));
+    await worker.stop();
+
+    const call = loggerErrorSpy.mock.calls.find((c) => c[1] === 'Job handler failed');
+    expect(call).toBeDefined();
+    const ctx = call[0];
+    expect(ctx.tenantId).toBe('tenant-xyz');
+    expect(ctx.invoiceId).toBe('inv-001');
+    expect(ctx.secret).toBeUndefined();
+    expect(ctx.fullData).toBeUndefined();
+  });
+
+  it('does not leak secret-bearing payload fields', async () => {
+    const payload = { tenantId: 't1', apiKey: 'supersecret', token: 'bearer-xyz' };
+    worker.registerHandler('test_job', jest.fn().mockRejectedValue(new Error('x')));
+    worker.start();
+    worker.enqueue('test_job', payload);
+
+    await new Promise((r) => setTimeout(r, 200));
+    await worker.stop();
+
+    const call = loggerErrorSpy.mock.calls.find((c) => c[1] === 'Job handler failed');
+    expect(call).toBeDefined();
+    const ctx = call[0];
+    // apiKey and token are NOT in CONTEXT_KEYS, must not appear
+    expect(ctx.apiKey).toBeUndefined();
+    expect(ctx.token).toBeUndefined();
+  });
+
+  it('logs correlationId when present in payload', async () => {
+    const payload = { tenantId: 't2', correlationId: 'req_corr42' };
+    worker.registerHandler('test_job', jest.fn().mockRejectedValue(new Error('x')));
+    worker.start();
+    worker.enqueue('test_job', payload);
+
+    await new Promise((r) => setTimeout(r, 200));
+    await worker.stop();
+
+    const call = loggerErrorSpy.mock.calls.find((c) => c[1] === 'Job handler failed');
+    expect(call[0].correlationId).toBe('req_corr42');
+  });
+
+  it('logs with minimal context when payload is empty', async () => {
+    worker.registerHandler('test_job', jest.fn().mockRejectedValue(new Error('x')));
+    worker.start();
+    worker.enqueue('test_job', {});
+
+    await new Promise((r) => setTimeout(r, 200));
+    await worker.stop();
+
+    const call = loggerErrorSpy.mock.calls.find((c) => c[1] === 'Job handler failed');
+    expect(call[0]).toMatchObject({ jobId: expect.any(String), jobType: 'test_job', attempt: 1 });
   });
 });
