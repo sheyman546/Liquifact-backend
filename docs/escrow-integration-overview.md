@@ -26,6 +26,54 @@
 
 ---
 
+## Derived fields and ledger time
+
+Three display fields are derived server-side by
+[`src/services/escrowDerived.js`](../src/services/escrowDerived.js) so the UI
+receives ready-to-render values:
+
+| Field | Source |
+|-------|--------|
+| `apyPercent` | `annualRatePercent` rounded to 2 dp (simple annual rate, no compounding) |
+| `fundedPercent` | `(fundedAmount / totalAmount) × 100`, 2 dp |
+| `daysToMaturity` | Days from reference time to `maturityDate`; negative = overdue |
+
+### Time-source precedence for `daysToMaturity`
+
+To prevent a clock-skewed host from mislabelling invoices as overdue or
+not-yet-mature, the computation uses the **Stellar ledger close time** when it
+is available:
+
+```
+1. opts.ledgerCloseTime   — Unix epoch seconds from the Soroban ledgerCloseTime
+                            field; sourced via readEscrowState / readEscrowStateWithAttestations.
+2. opts.now               — Explicit Date override (tests only).
+3. new Date()             — Server wall clock; last-resort fallback.
+                            ⚠ Caveat: may diverge from ledger time on a skewed
+                            host; always prefer ledgerCloseTime in production.
+```
+
+Callers that already have an escrow state from `readEscrowState` can pass the
+`ledgerCloseTime` field directly:
+
+```js
+const state = await readEscrowState(invoiceId);
+const derived = computeEscrowDerivedFields(state, {
+  ledgerCloseTime: state.ledgerCloseTime, // epoch seconds; may be undefined
+});
+```
+
+When `ledgerCloseTime` is absent (e.g. the Soroban stub does not return it),
+the function falls back transparently to the server wall clock with a warn-level
+log, preserving the existing behaviour.
+
+### Rounding
+
+All percent values use `Math.round(x * 100) / 100` (round-half-up at 2 dp) to
+avoid IEEE 754 drift in UI rendering.
+
+---
+
 ## Component map
 
 | Concern | Path | Key symbols |

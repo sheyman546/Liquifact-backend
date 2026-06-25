@@ -5,6 +5,12 @@
  * The service is intentionally side-effect-free: it reads state and returns a
  * plain object.  All mutation (funding, settlement) lives in separate modules.
  *
+ * Ledger time: when the Soroban response includes a `ledgerCloseTime` field
+ * (Unix epoch seconds), it is forwarded as `ledgerCloseTime` on the returned
+ * state so callers can pass it to {@link module:services/escrowDerived} as
+ * `opts.ledgerCloseTime`.  This ensures `daysToMaturity` is computed from
+ * ledger time rather than the server wall clock.
+ *
  * @module services/escrowRead
  */
 
@@ -149,6 +155,12 @@ async function readEscrowState(invoiceId, options = {}) {
     ...baseState,
     legal_hold: legalHold,
     funding_token: tokenMetadata,
+    // Forward ledger close time so callers can pass opts.ledgerCloseTime to
+    // computeEscrowDerivedFields.  The field is present only when the Soroban
+    // response includes it; absent otherwise (undefined is stripped by spread).
+    ...(baseState.ledgerCloseTime != null
+      ? { ledgerCloseTime: baseState.ledgerCloseTime }
+      : {}),
   };
 }
 
@@ -290,6 +302,9 @@ async function readEscrowStateWithAttestations(invoiceId, options = {}) {
     legal_hold: legalHold,
     attestations,
     funding_token: tokenMetadata,
+    ...(baseState.ledgerCloseTime != null
+      ? { ledgerCloseTime: baseState.ledgerCloseTime }
+      : {}),
   };
 }
 
