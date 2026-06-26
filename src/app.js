@@ -217,9 +217,15 @@ function createApp() {
 
   // Invoices — GET (list)
   app.get('/api/invoices', async (req, res) => {
-    const { isValid, errors, validatedParams } = validateInvoiceQueryParams(req.query);
+    const { isValid, fieldErrors, validatedParams } = validateInvoiceQueryParams(req.query);
     if (!isValid) {
-      return res.status(400).json({ errors });
+      return res.status(400).json({
+        type: 'https://liquifact.io/problems/validation-error',
+        title: 'Validation Error',
+        status: 400,
+        detail: 'Query parameters contain invalid values.',
+        fieldErrors,
+      });
     }
     const invoices = await invoiceService.getInvoices(validatedParams);
     res.json({

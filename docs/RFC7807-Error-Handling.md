@@ -94,7 +94,7 @@ The following problem types are defined:
 
 ## API Examples
 
-### 1. Validation Error
+### 1. Validation Error (Request Body)
 
 **Request:**
 
@@ -112,11 +112,44 @@ HTTP/1.1 400 Bad Request
 Content-Type: application/problem+json
 
 {
-  "type": "https://liquifact.com/probs/validation-error",
+  "type": "https://liquifact.io/problems/validation-error",
   "title": "Validation Error",
   "status": 400,
-  "detail": "Amount and customer are required fields",
-  "instance": "/api/invoices"
+  "detail": "Request body contains invalid or missing fields.",
+  "fieldErrors": {
+    "amount": "amount is required",
+    "seller": "seller is required",
+    "currency": "currency is required",
+    "dueDate": "dueDate is required",
+    "buyer": "buyer is required"
+  }
+}
+```
+
+### 1b. Validation Error (Query Parameters)
+
+**Request:**
+
+```bash
+curl -X GET "http://localhost:3001/api/marketplace?yieldBpsMin=-100&status=invalid" \
+  -H "Authorization: Bearer your-token"
+```
+
+**Response:**
+
+```http
+HTTP/1.1 400 Bad Request
+Content-Type: application/problem+json
+
+{
+  "type": "https://liquifact.io/problems/validation-error",
+  "title": "Validation Error",
+  "status": 400,
+  "detail": "Query parameters contain invalid values.",
+  "fieldErrors": {
+    "yieldBpsMin": "yieldBpsMin must be a non-negative integer",
+    "status": "Invalid status. Must be one of: pending_verification, verified, funded, partially_funded, completed, defaulted"
+  }
 }
 ```
 

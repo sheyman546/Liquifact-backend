@@ -191,7 +191,8 @@ describe('Marketplace API', () => {
         .set('Authorization', `Bearer ${tokenA}`);
 
       expect(res.status).toBe(400);
-      expect(res.body.errors).toBeDefined();
+      expect(res.body.fieldErrors).toBeDefined();
+      expect(res.body.fieldErrors.status).toBeDefined();
     });
   });
 
@@ -323,8 +324,8 @@ describe('Marketplace API', () => {
         .set('Authorization', `Bearer ${tokenA}`);
 
       expect(res.status).toBe(400);
-      expect(res.body.errors).toBeDefined();
-      expect(res.body.errors.length).toBeGreaterThan(0);
+      expect(res.body.fieldErrors).toBeDefined();
+      expect(res.body.fieldErrors.cursor).toBeDefined();
     });
 
     it('returns 400 for a base64-valid but tampered cursor', async () => {
@@ -337,7 +338,7 @@ describe('Marketplace API', () => {
         .set('Authorization', `Bearer ${tokenA}`);
 
       expect(res.status).toBe(400);
-      expect(res.body.errors[0]).toMatch(/signature/i);
+      expect(res.body.fieldErrors.cursor).toMatch(/signature/i);
     });
 
     it('returns 400 when cursor sort field does not match requested sortBy', async () => {
@@ -349,7 +350,7 @@ describe('Marketplace API', () => {
         .set('Authorization', `Bearer ${tokenA}`);
 
       expect(res.status).toBe(400);
-      expect(res.body.errors[0]).toMatch(/sort field/i);
+      expect(res.body.fieldErrors.cursor).toMatch(/sort field/i);
     });
 
     it('data length equals limit when hasMore=true', async () => {
@@ -376,8 +377,8 @@ describe('Marketplace API', () => {
         .set('Authorization', `Bearer ${tokenA}`);
 
       expect(res.status).toBe(400);
-      expect(res.body.errors).toBeDefined();
-      expect(res.body.errors.length).toBeGreaterThan(0);
+      expect(res.body.fieldErrors).toBeDefined();
+      expect(res.body.fieldErrors.yieldBpsMin).toBeDefined();
     });
 
     it('returns 400 for fundedRatioMin > 100', async () => {
@@ -543,23 +544,23 @@ describe('validateMarketplaceQueryParams – cursor support', () => {
   });
 
   it('rejects an empty cursor string', () => {
-    const { isValid, errors } = validateMarketplaceQueryParams({ cursor: '' });
+    const { isValid, fieldErrors } = validateMarketplaceQueryParams({ cursor: '' });
     expect(isValid).toBe(false);
-    expect(errors[0]).toMatch(/cursor/i);
+    expect(fieldErrors.cursor).toMatch(/cursor/i);
   });
 
   it('rejects a cursor over 2048 characters', () => {
-    const { isValid, errors } = validateMarketplaceQueryParams({
+    const { isValid, fieldErrors } = validateMarketplaceQueryParams({
       cursor: 'a'.repeat(2049),
     });
     expect(isValid).toBe(false);
-    expect(errors[0]).toMatch(/cursor/i);
+    expect(fieldErrors.cursor).toMatch(/cursor/i);
   });
 
   it('still validates page when no cursor', () => {
-    const { isValid, errors } = validateMarketplaceQueryParams({ page: '0' });
+    const { isValid, fieldErrors } = validateMarketplaceQueryParams({ page: '0' });
     expect(isValid).toBe(false);
-    expect(errors[0]).toMatch(/page/i);
+    expect(fieldErrors.page).toMatch(/page/i);
   });
 
   it('accepts all valid sort fields', () => {
