@@ -48,6 +48,7 @@ const invoiceStateRoutes = require('./routes/invoiceStateRoutes');
 const adminEscrowRoutes = require('./routes/adminEscrow');
 const kycRoutes = require('./routes/kyc');
 const v1Routes = require('./routes/v1');
+const investorRoutes = require('./routes/investor');
 
 /**
  * Returns a 403 JSON response only for the dedicated blocked-origin CORS error.
@@ -311,6 +312,7 @@ function createApp() {
   app.use('/api/invoices', invoiceFileRoutes);
   app.use('/api/invoices', invoiceStateRoutes);
   app.use('/api/invest', investRoutes);
+  app.use('/api/investor', investorRoutes);
   app.use('/api/kyc', kycRoutes);
   app.use('/api/marketplace', marketplaceRoutes);
   app.use('/api/retention', retentionRoutes);

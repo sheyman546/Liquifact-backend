@@ -816,6 +816,64 @@ The backend supports durable idempotency keys for funding operations to safely r
 
 ---
 
+## Investor Commitment
+
+`src/services/investorCommitment.js` persists funding intents from the `POST /api/invest/fund-invoice` flow and exposes an in-memory lock store for the `GET /api/investor/locks` routes.
+
+### Amount validation
+
+`amountStroops` is the on-chain principal unit. The service enforces strict format rules **before any database write**:
+
+| Rule | Detail |
+|------|--------|
+| Type | Must be a `string` — numeric types are rejected, never coerced |
+| Format | Digits only — no decimal point, no sign, no scientific notation |
+| Leading zeros | Rejected (e.g. `"007"`) |
+| Range | Must be `> 0` and `≤ 10^18` stroops (≈ 10 billion XLM) |
+
+Any violation throws a `CommitmentValidationError` with a typed `.code`:
+
+| Code | Trigger |
+|------|---------|
+| `INVALID_AMOUNT_TYPE` | Value is not a string |
+| `INVALID_AMOUNT_FORMAT` | Contains non-digit characters or leading zeros |
+| `INVALID_AMOUNT_RANGE` | Value is zero |
+| `INVALID_AMOUNT_OVERFLOW` | Value exceeds the upper bound |
+| `INVALID_INVESTOR_ADDRESS` | Investor address fails Stellar address validation |
+| `AMOUNT_IMMUTABLE` | Caller attempted to update `amount_stroops` via `updateCommitment` |
+
+### Address validation
+
+`validateAddress(address)` checks that the investor address is a valid Stellar public key (G… or C… prefix, 56 base-32 characters). It returns `{ valid, reason }` and is also called from the `GET /api/investor/locks` routes to validate the `funderAddress` query parameter.
+
+### Idempotency
+
+`persistCommitment` accepts an optional `idempotencyKey`. When a row with that key already exists the function returns it immediately — no second insert is made. `updateCommitment` refuses to modify `amount_stroops` to prevent silent corruption of commitment records.
+
+### In-memory lock store
+
+The service maintains a `Map`-backed lock cache (claimNotBefore, investorEffectiveYieldBps) mirrored from the DB. All cached entries carry `stale: true` because they are not read live from the chain.
+
+| Function | Purpose |
+|----------|---------|
+| `seedInvestorLocks()` | Populate representative data (used in tests) |
+| `clearInvestorLocks()` | Wipe the cache (used between test suites) |
+| `setInvestorLock(params)` | Upsert a lock record |
+| `getInvestorLock(invoiceId, funderAddress)` | Look up a single lock |
+| `getInvestorLocksByAddress(funderAddress, opts)` | Filter by funder address |
+| `getAllInvestorLocks(opts)` | List all locks |
+
+### API routes
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/investor/locks` | List locks, optional `funderAddress` / `invoiceId` filters |
+| `GET` | `/api/investor/locks/:invoiceId` | Single lock for a specific invoice and funder |
+
+Both routes require a valid JWT (`Authorization: Bearer <token>`). An invalid `funderAddress` returns `400` with `{ error: "invalid Stellar address: …" }`.
+
+---
+
 ## Security audit log (Issue #116)
 
 The backend now supports a database-backed append-only audit log for:
