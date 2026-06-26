@@ -493,13 +493,27 @@ const footprintCacheEvictionsTotal = new client.Counter({
 
 /**
  * Counter: Soroban circuit breaker state transitions.
- * Labelled by the new state name to allow counting transitions into each state.
+ *
+ * Labels:
+ * - `breaker_name` — Distinguishes breakers per dependency (`soroban`, `redis`, `kyc`, …)
+ * - `from_state` — The previous circuit breaker state (CLOSED, OPEN, HALF_OPEN)
+ * - `to_state`   — The new circuit breaker state (CLOSED, OPEN, HALF_OPEN)
+ *
+ * Emission points:
+ * - `_transitionState()` in `src/utils/circuitBreaker.js` fires this counter
+ *   every time the internal state changes (CLOSED→OPEN, OPEN→HALF_OPEN,
+ *   HALF_OPEN→CLOSED, HALF_OPEN→OPEN, or an explicit `reset()` to CLOSED).
+ *
+ * Cardinality is intentionally bounded:
+ *   (#breaker names) × (3 from_states) × (3 to_states) ≤ #breaker names × 9
+ * All label values come from the fixed `CircuitBreakerState` enum.
+ *
  * @type {import('prom-client').Counter}
  */
 const sorobanCircuitBreakerStateTransitionsTotal = new client.Counter({
   name: 'soroban_circuit_breaker_state_transitions_total',
-  help: 'Total number of Soroban circuit breaker state transitions, labelled by state',
-  labelNames: ['state'],
+  help: 'Total number of Soroban circuit breaker state transitions, labelled by breaker, from_state, and to_state',
+  labelNames: ['breaker_name', 'from_state', 'to_state'],
   registers: [registry],
 });
 
@@ -525,6 +539,17 @@ const cacheStoreErrorsTotal = new client.Counter({
   registers: [registry],
 });
 
+/**
+ * Counter: Redis cache errors that fail open (swallowed, no re-throw).
+ * Incremented when a Redis get/set/del operation throws.
+ * @type {import('prom-client').Counter}
+ */
+const redisCacheFailOpenTotal = new client.Counter({
+  name: 'redis_cache_fail_open_total',
+  help: 'Total number of Redis cache errors that are swallowed (fail-open)',
+  registers: [registry],
+});
+
 module.exports = {
   registry,
   metricsAuth,
@@ -533,7 +558,11 @@ module.exports = {
   registerWorker,
   refreshMetrics,
   resetMetricsForTests,
+  safeEqual,
+  extractClientIp,
+  LOOPBACK,
   cacheStoreErrorsTotal,
+  redisCacheFailOpenTotal,
   footprintCacheHitsTotal,
   footprintCacheMissesTotal,
   footprintCacheEvictionsTotal,

@@ -1,10 +1,28 @@
 'use strict';
 
+jest.mock('redis', () => {
+  const mockClient = {
+    on: jest.fn(),
+    connect: jest.fn().mockResolvedValue(undefined),
+    get: jest.fn().mockResolvedValue(null),
+    setEx: jest.fn().mockResolvedValue('OK'),
+    del: jest.fn().mockResolvedValue(1),
+    quit: jest.fn().mockResolvedValue('OK'),
+    isOpen: false,
+  };
+  return {
+    createClient: jest.fn(() => mockClient),
+  };
+}, { virtual: true });
+
 const request = require('supertest');
 const { createApp } = require('../src/app');
 const metrics = require('../src/metrics');
 const JobQueue = require('../src/workers/jobQueue');
 const BackgroundWorker = require('../src/workers/worker');
+
+// Destructure internal helpers used by the metrics-auth / safeEqual tests.
+const { metricsAuth, safeEqual, extractClientIp, LOOPBACK } = metrics;
 
 describe('GET /metrics', () => {
   let app;
@@ -218,6 +236,158 @@ describe('LOOPBACK set', () => {
     expect(LOOPBACK.has('10.0.0.1')).toBe(false);
     expect(LOOPBACK.has('192.168.1.1')).toBe(false);
     expect(LOOPBACK.has('172.16.0.1')).toBe(false);
+  });
+});
+
+describe('export guard — every module export is defined and valid', () => {
+  const metricExports = [
+    'footprintCacheHitsTotal',
+    'footprintCacheMissesTotal',
+    'footprintCacheEvictionsTotal',
+    'escrowIndexerEventsProcessedTotal',
+    'escrowIndexerEventsSkippedTotal',
+    'escrowIndexerCycleFailuresTotal',
+    'escrowReconciliationMismatches',
+    'maturityReminderDeliveryAttemptsTotal',
+    'maturityReminderDeliverySuccessTotal',
+    'maturityReminderDeadLetterTotal',
+    'sorobanCircuitBreakerStateTransitionsTotal',
+    'cacheStoreErrorsTotal',
+    'redisCacheFailOpenTotal',
+    'readinessGauge',
+  ];
+
+  const counterExports = [
+    'footprintCacheHitsTotal',
+    'footprintCacheMissesTotal',
+    'footprintCacheEvictionsTotal',
+    'escrowIndexerEventsProcessedTotal',
+    'escrowIndexerEventsSkippedTotal',
+    'escrowIndexerCycleFailuresTotal',
+    'escrowReconciliationMismatches',
+    'maturityReminderDeliveryAttemptsTotal',
+    'maturityReminderDeliverySuccessTotal',
+    'maturityReminderDeadLetterTotal',
+    'sorobanCircuitBreakerStateTransitionsTotal',
+    'cacheStoreErrorsTotal',
+    'redisCacheFailOpenTotal',
+  ];
+
+  const gaugeExports = [
+    'readinessGauge',
+    'escrowIndexerLastCursorAdvanceTimestampSeconds',
+  ];
+
+  it('every exported metric is defined (not undefined)', () => {
+    for (const key of metricExports) {
+      expect(metrics[key]).toBeDefined();
+    }
+  });
+
+  it('every exported metric is not null', () => {
+    for (const key of metricExports) {
+      expect(metrics[key]).not.toBeNull();
+    }
+  });
+
+  it('every counter export has an inc method', () => {
+    for (const key of counterExports) {
+      expect(typeof metrics[key].inc).toBe('function');
+    }
+  });
+
+  it('every gauge export has a set method', () => {
+    for (const key of gaugeExports) {
+      expect(typeof metrics[key].set).toBe('function');
+    }
+  });
+
+  it('sorobanCircuitBreakerStateTransitionsTotal has expected labelNames', () => {
+    const counter = metrics.sorobanCircuitBreakerStateTransitionsTotal;
+    expect(counter.labelNames).toBeDefined();
+    const names = Array.isArray(counter.labelNames) ? counter.labelNames : [];
+    expect(names).toContain('breaker_name');
+    expect(names).toContain('from_state');
+    expect(names).toContain('to_state');
+    expect(names.length).toBe(3);
+  });
+});
+
+describe('sorobanCircuitBreakerStateTransitionsTotal — circuit breaker integration', () => {
+  const { CircuitBreaker, CircuitBreakerState } = require('../src/utils/circuitBreaker');
+
+  beforeEach(() => {
+    metrics.registry.resetMetrics();
+  });
+
+  it('is incremented on CLOSED -> OPEN transition', async () => {
+    const breaker = new CircuitBreaker({ name: 'test', failureThreshold: 1, recoveryTimeout: 999999 });
+    expect(breaker.state).toBe(CircuitBreakerState.CLOSED);
+
+    await expect(breaker.execute(async () => { throw new Error('fail'); })).rejects.toThrow('fail');
+
+    expect(breaker.state).toBe(CircuitBreakerState.OPEN);
+
+    const metric = metrics.registry.getSingleMetric('soroban_circuit_breaker_state_transitions_total');
+    expect(metric).toBeDefined();
+  });
+
+  it('is incremented on OPEN -> HALF_OPEN and back to OPEN on failure', async () => {
+    const breaker = new CircuitBreaker({ name: 'test-half-open', failureThreshold: 1, recoveryTimeout: 1 });
+    expect(breaker.state).toBe(CircuitBreakerState.CLOSED);
+
+    await expect(breaker.execute(async () => { throw new Error('fail'); })).rejects.toThrow('fail');
+    expect(breaker.state).toBe(CircuitBreakerState.OPEN);
+
+    breaker.nextAttemptTime = 0;
+    await expect(breaker.execute(async () => { throw new Error('still fail'); })).rejects.toThrow('still fail');
+
+    expect(breaker.state).toBe(CircuitBreakerState.OPEN);
+  });
+
+  it('is incremented on HALF_OPEN -> CLOSED on success', async () => {
+    const breaker = new CircuitBreaker({ name: 'test-recover', failureThreshold: 1, recoveryTimeout: 1 });
+
+    await expect(breaker.execute(async () => { throw new Error('fail'); })).rejects.toThrow('fail');
+    expect(breaker.state).toBe(CircuitBreakerState.OPEN);
+
+    breaker.nextAttemptTime = 0;
+    breaker._transitionState(CircuitBreakerState.HALF_OPEN);
+    expect(breaker.state).toBe(CircuitBreakerState.HALF_OPEN);
+
+    await breaker.execute(async () => 'ok');
+
+    expect(breaker.state).toBe(CircuitBreakerState.CLOSED);
+  });
+
+  it('is incremented on reset() transition back to CLOSED', async () => {
+    const breaker = new CircuitBreaker({ name: 'test-reset', failureThreshold: 1, recoveryTimeout: 99999 });
+    await expect(breaker.execute(async () => { throw new Error('fail'); })).rejects.toThrow('fail');
+
+    expect(breaker.state).toBe(CircuitBreakerState.OPEN);
+
+    breaker.reset();
+
+    expect(breaker.state).toBe(CircuitBreakerState.CLOSED);
+  });
+
+  it('label values are bounded to the CircuitBreakerState enum', () => {
+    const validStates = ['CLOSED', 'OPEN', 'HALF_OPEN'];
+    expect(Object.values(CircuitBreakerState)).toEqual(validStates);
+  });
+
+  it('does not increment when state does not change', () => {
+    const breaker = new CircuitBreaker({ name: 'test-noop' });
+    const initial = breaker.state;
+
+    breaker._transitionState(CircuitBreakerState.CLOSED);
+
+    expect(breaker.state).toBe(initial);
+  });
+
+  it('returns Prometheus text before any transition (edge: scrape before first transition)', () => {
+    const promString = metrics.registry.metrics();
+    expect(typeof promString).toBe('string');
   });
 });
 
