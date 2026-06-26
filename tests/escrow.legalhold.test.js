@@ -19,7 +19,46 @@ process.env.JWT_SECRET = 'test-secret';
 
 const request = require('supertest');
 const jwt = require('jsonwebtoken');
+const { describe, it } = require('mocha');
+const expect = require('chai').expect;
+const express = require('express');
+const request = require('supertest');
+const sinon = require('sinon');
+const escrowRead = require('../services/escrowRead');
+const { legalHoldGate } = require('../middleware/legalHoldGate');
 
+describe('Legal Hold Interception Gate Validation Suite', () => {
+  let sandbox;
+
+  beforeEach(() => {
+    sandbox = sinon.createSandbox();
+  });
+
+  afterEach(() => {
+    sandbox.restore();
+  });
+
+  it('should allow flow processing when legal_hold flag evaluates to false', async () => {
+    sandbox.stub(escrowRead, 'getEscrowStatus').resolves({ legal_hold: false });
+
+    const app = express();
+    app.get('/test/:invoiceId', (req, res, next) => { req.params.invoiceId = 'inv-123'; next(); }, legalHoldGate(), (req, res) => res.sendStatus(200));
+
+    const res = await request(app).get('/test/inv-123');
+    expect(res.status).to.equal(200);
+  });
+
+  it('should block execution with a 423 Locked profile when hold flag evaluates to true', async () => {
+    sandbox.stub(escrowRead, 'getEscrowStatus').resolves({ legal_hold: true });
+
+    const app = express();
+    app.post('/test', (req, res, next) => { req.body = { invoiceId: 'inv-456' }; next(); }, legalHoldGate(), (req, res) => res.sendStatus(200));
+
+    const res = await request(app).post('/test');
+    expect(res.status).to.equal(423);
+    expect(res.body.title).to.equal('Legal Hold Active');
+  });
+});
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 /** Mint a valid JWT for authenticated routes. */

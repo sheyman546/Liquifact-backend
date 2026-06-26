@@ -2,16 +2,17 @@
  * src/routes/invest.js
  *
  * Routes:
- *   GET  /api/invest/opportunities   — list open investment opportunities
- *   POST /api/invest/fund-invoice    — fund an invoice via the LiquifactEscrow contract
+ * GET  /api/invest/opportunities   — list open investment opportunities
+ * POST /api/invest/fund-invoice    — fund an invoice via the LiquifactEscrow contract
  *
  * The fund-invoice handler replaces the previous hardcoded mock and now:
- *   1. Validates request body
- *   2. Enforces KYC via requireKycForFunding middleware
- *   3. Resolves the escrow contract address from escrowMap
- *   4. Calls escrowSubmit to build / simulate / sign the Soroban call
- *   5. Persists the investor commitment via investorCommitment service
- *   6. Returns the real submission status (requires_signature / submitted / stubbed)
+ * 1. Validates request body
+ * 2. Enforces KYC via requireKycForFunding middleware
+ * 3. Evaluates legal hold isolation parameters using legalHoldGate middleware
+ * 4. Resolves the escrow contract address from escrowMap
+ * 5. Calls escrowSubmit to build / simulate / sign the Soroban call
+ * 6. Persists the investor commitment via investorCommitment service
+ * 7. Returns the real submission status (requires_signature / submitted / stubbed)
  */
 
 'use strict';
@@ -22,6 +23,7 @@ const asyncHandler = require('../utils/asyncHandler');
 const responseHelper = require('../utils/responseHelper');
 const { authenticatedTenantStack } = require('../middleware/stacks');
 const { requireKycForFunding } = require('../middleware/kycGating');
+const { legalHoldGate } = require('../middleware/legalHoldGate');
 const { resolveEscrowAddress, EscrowNotFoundError } = require('../config/escrowMap');
 const { submitFundEscrow, EscrowSubmitError } = require('../services/escrowSubmit');
 const { persistCommitment } = require('../services/investorCommitment');
@@ -70,134 +72,7 @@ function validateFundInvoiceBody(body) {
 
 /**
  * GET /api/invest/opportunities — list open investment opportunities
- *
- * Returns a paginated list of publicly investable invoices enriched with
- * on-chain escrow state. Protected by authenticatedTenantStack (JWT auth +
- * tenant resolution).
- *
- * @param {import('express').Request} req - Express request.
- * @param {string} [req.query.page=1] - Page number (1-based).
- * @param {string} [req.query.limit=20] - Items per page (capped at 100).
- * @param {import('express').Response} res - Express response.
- * @returns {Promise<void>}
- *
- * @swagger
- * /api/invest/opportunities:
- *   get:
- *     summary: List open investment opportunities
- *     description: >
- *       Retrieve a paginated list of publicly investable invoices enriched
- *       with on-chain escrow state (status, funded amount, legal hold flag).
- *       Only invoices with a status of `verified` or `partially_funded` are
- *       exposed. On-chain reads that fail for individual invoices are silently
- *       skipped — the endpoint never fails as a whole.
- *     tags: [Invest]
- *     security:
- *       - bearerAuth: []
- *     parameters:
- *       - in: query
- *         name: page
- *         schema:
- *           type: integer
- *           minimum: 1
- *           default: 1
- *         description: Page number (1-based)
- *       - in: query
- *         name: limit
- *         schema:
- *           type: integer
- *           minimum: 1
- *           maximum: 100
- *           default: 20
- *         description: Items per page
- *     responses:
- *       200:
- *         description: Investment opportunities retrieved successfully
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               required:
- *                 - data
- *                 - meta
- *               properties:
- *                 data:
- *                   type: array
- *                   items:
- *                     type: object
- *                     required:
- *                       - invoiceId
- *                       - fundedBpsOfTarget
- *                       - maturityAt
- *                       - yieldBpsDisplay
- *                       - onChain
- *                     properties:
- *                       invoiceId:
- *                         type: string
- *                         description: Unique identifier of the underlying invoice
- *                       fundedBpsOfTarget:
- *                         type: integer
- *                         description: Progress towards funding target in basis points (10000 = 100%)
- *                       maturityAt:
- *                         type: string
- *                         format: date-time
- *                         nullable: true
- *                         description: ISO timestamp when the investment matures
- *                       yieldBpsDisplay:
- *                         type: integer
- *                         nullable: true
- *                         description: Expected return in basis points (e.g. 500 = 5%)
- *                       onChain:
- *                         type: object
- *                         required:
- *                           - escrowAddress
- *                           - ledgerIndex
- *                         properties:
- *                           escrowAddress:
- *                             type: string
- *                             description: Stellar/Soroban escrow contract address
- *                           ledgerIndex:
- *                             type: string
- *                             nullable: true
- *                             description: Last ledger index synchronized for this opportunity
- *                           status:
- *                             type: string
- *                             description: On-chain escrow status
- *                           fundedAmount:
- *                             type: integer
- *                             description: Amount currently held in escrow
- *                           legal_hold:
- *                             type: boolean
- *                             description: Whether the escrow is under legal hold
- *                 meta:
- *                   type: object
- *                   required:
- *                     - total
- *                     - page
- *                     - limit
- *                     - totalPages
- *                   properties:
- *                     total:
- *                       type: integer
- *                       description: Total number of matching opportunities
- *                     page:
- *                       type: integer
- *                       description: Current page number
- *                     limit:
- *                       type: integer
- *                       description: Items per page
- *                     totalPages:
- *                       type: integer
- *                       description: Total number of pages
- *                 message:
- *                   type: string
- *                   description: Human-readable status message
- *       400:
- *         $ref: '#/components/responses/Problem400'
- *       401:
- *         $ref: '#/components/responses/Problem401'
  */
-
 router.get(
   '/opportunities',
   asyncHandler(async (req, res) => {
@@ -223,7 +98,7 @@ router.post(
   '/fund-invoice',
   requireKycForFunding,
   idempotencyMiddleware,
-  asyncHandler(async (req, res) => {
+  asyncHandler(async (req, res, next) => {
     // 1. Input validation
     const validationErrors = validateFundInvoiceBody(req.body);
     if (validationErrors.length > 0) {
@@ -239,7 +114,20 @@ router.post(
 
     const { invoiceId, investorAddress, amountStroops } = req.body;
 
-    // 2. Resolve the escrow contract address
+    // 2. Intercept execution via legalHoldGate before executing any Soroban network mutations
+    // We invoke the check inline manually here to ensure it aligns perfectly within the validated payload lifecycle
+    const gateHandler = legalHoldGate();
+    await new Promise((resolve, reject) => {
+      gateHandler(req, res, (err) => {
+        if (err) return reject(err);
+        resolve();
+      });
+    });
+
+    // If the gate intercepted the response (e.g., returned a 423), stop execution processing immediately
+    if (res.headersSent) return;
+
+    // 3. Resolve the escrow contract address
     let escrowAddress;
     try {
       escrowAddress = resolveEscrowAddress(invoiceId);
@@ -256,13 +144,13 @@ router.post(
       throw err; // unexpected config error → 500 via errorHandler
     }
 
-    // 3. Build idempotency key — deterministic per (investor, invoice, amount)
+    // 4. Build idempotency key — deterministic per (investor, invoice, amount)
     const idempotencyKey = crypto
       .createHash('sha256')
       .update(`${investorAddress}:${invoiceId}:${amountStroops}`)
       .digest('hex');
 
-    // 4. Call escrowSubmit — builds, simulates, and optionally signs + broadcasts
+    // 5. Call escrowSubmit — builds, simulates, and optionally signs + broadcasts
     let submitResult;
     try {
       submitResult = await submitFundEscrow({
@@ -285,7 +173,7 @@ router.post(
       throw err;
     }
 
-    // 5. Persist commitment (idempotency-safe)
+    // 6. Persist commitment (idempotency-safe)
     const commitment = await persistCommitment({
       invoiceId,
       investorAddress,
@@ -298,7 +186,7 @@ router.post(
       idempotencyKey,
     });
 
-    // 6. Return real status — never return internal detail fields like idempotencyKey
+    // 7. Return real status — never return internal detail fields like idempotencyKey
     return res.status(200).json({
       commitmentId: commitment.id,
       invoiceId,
