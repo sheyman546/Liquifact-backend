@@ -362,5 +362,8 @@ module.exports = {
   footprintCacheEvictionsTotal,
   sorobanCircuitBreakerStateTransitionsTotal,
   escrowReconciliationMismatches,
+  maturityReminderDeliveryAttemptsTotal,
+  maturityReminderDeliverySuccessTotal,
+  maturityReminderDeadLetterTotal,
   readinessGauge,
 };
