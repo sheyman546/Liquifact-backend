@@ -134,6 +134,11 @@ jest.mock('@stellar/stellar-sdk/rpc', () => ({
     getTransaction: jest.fn(),
     sendTransaction: jest.fn(),
     simulateTransaction: jest.fn(),
+    // Required by the issue #436 contract-existence preflight in
+    // src/services/escrowSubmit.js (`_preflightContractExists`).
+    getLedgerEntry: jest.fn(),
+    getContractData: jest.fn(),
+    prepareTransaction: jest.fn(),
   })),
 }), { virtual: true });
 

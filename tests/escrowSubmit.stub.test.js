@@ -297,3 +297,212 @@ describe('POST /api/escrow funding stub', () => {
     expect(response.body.error.message).toContain('invoiceId contains unsupported characters.');
   });
 });
+
+// =============================================================================
+// Issue #436 — Contract-existence preflight for custodial escrow funding.
+//
+// These tests are colocated here per the issue's "Write comprehensive tests
+// in tests/escrowSubmit.stub.test.js" instruction. They target the new
+// `_preflightContractExists` helper that `submitFundEscrow()` invokes between
+// `new Server(...)` and `server.getAccount(...)`.
+//
+// Note: the earlier `require('../src/index')` block at the top of this file
+// transitively pulls in `src/cache/redis.js`, which depends on the optional
+// `redis` package — a pre-existing issue (PR #472 §14.2) that prevents this
+// file from loading at all until it is cleared. The companion isolated file
+// `tests/escrowSubmit.preflight.test.js` exercises the *same* scenarios
+// without that load-time blocker so the preflight logic can be verified today.
+// =============================================================================
+
+describe('escrowSubmit contract preflight (issue #436)', () => {
+  const CONTRACT_ID = `C${'A'.repeat(55)}`;
+  const PUBLIC_KEY = `G${'A'.repeat(55)}`;
+
+  const rpcModule = require('@stellar/stellar-sdk/rpc');
+
+  // Re-import these locally so we can re-require after jest.resetModules()
+  // inside `beforeEach`.
+  let escrowModule;
+
+  let ledgerSpy;
+  let accountSpy;
+  let simulateSpy;
+
+  beforeEach(() => {
+    jest.resetModules();
+    process.env.ESCROW_SIGNING_MODE = 'custodial';
+    process.env.SOROBAN_RPC_URL = 'https://soroban-testnet.stellar.org';
+    process.env.STELLAR_NETWORK_PASSPHRASE = 'Test SDF Network ; September 2015';
+    process.env.ESCROW_PLATFORM_ADDRESS = PUBLIC_KEY;
+
+    escrowModule = require('../src/services/escrowSubmit');
+
+    // `tests/mocks/setup.js` registers a virtual mock where `Server` is a
+    // `jest.fn().mockImplementation(() => ({...}))`. Each `new Server()`
+    // returns the plain object produced by the implementation, NOT a
+    // prototype-constructed instance — so we cannot patch Server.prototype
+    // to swap method spies. Instead, replace the implementation per-test
+    // and capture the test-scoped spies.
+    ledgerSpy = jest.fn();
+    accountSpy = jest.fn().mockResolvedValue({
+      accountId: () => PUBLIC_KEY,
+      sequenceNumber: () => '1',
+    });
+    simulateSpy = jest.fn().mockResolvedValue({ error: null });
+
+    rpcModule.Server.mockImplementation(() => ({
+      getTransaction: jest.fn(),
+      sendTransaction: jest.fn(),
+      simulateTransaction: simulateSpy,
+      getLedgerEntry: ledgerSpy,
+      getAccount: accountSpy,
+      getContractData: jest.fn(),
+      prepareTransaction: jest.fn(),
+    }));
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+    delete process.env.ESCROW_SIGNING_MODE;
+    delete process.env.SOROBAN_RPC_URL;
+    delete process.env.STELLAR_NETWORK_PASSPHRASE;
+    delete process.env.ESCROW_PLATFORM_ADDRESS;
+  });
+
+  it('passes through to simulation when the contract exists on-ledger', async () => {
+    ledgerSpy.mockResolvedValueOnce({
+      latestLedger: 100,
+      latestLedgerSequence: 100,
+      val: Buffer.from('present'),
+    });
+
+    const result = await escrowModule.submitFundEscrow({
+      escrowAddress: CONTRACT_ID,
+      investorAddress: PUBLIC_KEY,
+      amountStroops: '1000',
+      invoiceId: 'inv_preflight_ok',
+    });
+
+    expect(result.status).toBe('submitted');
+    expect(ledgerSpy).toHaveBeenCalledTimes(1);
+    expect(accountSpy).toHaveBeenCalledTimes(1);
+    expect(simulateSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects with CONTRACT_NOT_FOUND when getLedgerEntry returns empty val', async () => {
+    ledgerSpy.mockResolvedValueOnce({
+      latestLedger: 100,
+      latestLedgerSequence: 100,
+      val: Buffer.alloc(0),
+    });
+
+    await expect(
+      escrowModule.submitFundEscrow({
+        escrowAddress: CONTRACT_ID,
+        investorAddress: PUBLIC_KEY,
+        amountStroops: '1000',
+        invoiceId: 'inv_preflight_missing_1',
+      }),
+    ).rejects.toMatchObject({
+      name: 'EscrowSubmitError',
+      code: 'CONTRACT_NOT_FOUND',
+      status: 404,
+      message: 'Escrow contract not found on the network.',
+    });
+
+    // Preflight fails BEFORE getAccount is called → no extra RPC.
+    expect(accountSpy).not.toHaveBeenCalled();
+    expect(simulateSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects with PREFLIGHT_RPC_ERROR when getLedgerEntry throws', async () => {
+    ledgerSpy.mockRejectedValueOnce(
+      Object.assign(new Error('upstream blew up'), { code: 'ECONNRESET' }),
+    );
+
+    await expect(
+      escrowModule.submitFundEscrow({
+        escrowAddress: CONTRACT_ID,
+        investorAddress: PUBLIC_KEY,
+        amountStroops: '1000',
+        invoiceId: 'inv_preflight_rpc_fail',
+      }),
+    ).rejects.toMatchObject({
+      name: 'EscrowSubmitError',
+      code: 'PREFLIGHT_RPC_ERROR',
+      status: 503,
+      message: 'Escrow contract preflight failed; please retry.',
+    });
+
+    expect(accountSpy).not.toHaveBeenCalled();
+    expect(simulateSpy).not.toHaveBeenCalled();
+  });
+
+  it('rejects with INVALID_CONTRACT_ADDRESS when address cannot be parsed', async () => {
+    await expect(
+      escrowModule.submitFundEscrow({
+        escrowAddress: 'not-actually-stellar',
+        investorAddress: PUBLIC_KEY,
+        amountStroops: '1000',
+        invoiceId: 'inv_preflight_bad_addr',
+      }),
+    ).rejects.toMatchObject({
+      name: 'EscrowSubmitError',
+      code: 'INVALID_CONTRACT_ADDRESS',
+      status: 400,
+      message: 'Invalid escrow contract address.',
+    });
+
+    expect(ledgerSpy).not.toHaveBeenCalled();
+  });
+
+  it('does not expose raw RPC error text in the thrown error', async () => {
+    const SENSITIVE = 'AKIASUPERSECRET in upstream RPC message; secret leak attempt';
+    ledgerSpy.mockRejectedValueOnce(
+      Object.assign(new Error(SENSITIVE), { code: 'INTERNAL_ERROR' }),
+    );
+
+    const caught = await escrowModule
+      .submitFundEscrow({
+        escrowAddress: CONTRACT_ID,
+        investorAddress: PUBLIC_KEY,
+        amountStroops: '1000',
+        invoiceId: 'inv_preflight_redaction',
+      })
+      .then(
+        () => null,
+        (err) => err,
+      );
+
+    expect(caught).toBeInstanceOf(escrowModule.EscrowSubmitError);
+    expect(String(caught.message)).toBe('Escrow contract preflight failed; please retry.');
+    expect(String(caught.message)).not.toContain('AKIASUPERSECRET');
+    expect(String(caught.message)).not.toContain('upstream RPC message');
+    expect(caught.code).toBe('PREFLIGHT_RPC_ERROR');
+    expect(caught.status).toBe(503);
+  });
+
+  it('the stubbed mode bypasses the preflight entirely (no contract lookup)', async () => {
+    process.env.ESCROW_SIGNING_MODE = 'stubbed';
+    jest.resetModules();
+    const stubbed = require('../src/services/escrowSubmit');
+    const result = await stubbed.submitFundEscrow({
+      escrowAddress: CONTRACT_ID,
+      investorAddress: PUBLIC_KEY,
+      amountStroops: '1000',
+      invoiceId: 'inv_preflight_stub',
+    });
+    expect(result.status).toBe('stubbed');
+    expect(ledgerSpy).not.toHaveBeenCalled();
+  });
+
+  it('_preflightContractExists can be unit-tested directly without going through submitFundEscrow', async () => {
+    const fakeServer = {
+      getLedgerEntry: jest.fn().mockResolvedValue({ val: Buffer.from('x') }),
+    };
+    await expect(
+      escrowModule._preflightContractExists(fakeServer, CONTRACT_ID),
+    ).resolves.toBeUndefined();
+    expect(fakeServer.getLedgerEntry).toHaveBeenCalledTimes(1);
+  });
+});

@@ -84,6 +84,12 @@ try {
   };
 }
 
+// Hoisted to the top so the gauges below can register against `registry`
+// without triggering a TDZ error at module-load time. The
+// `client.collectDefaultMetrics` registration deliberately stays AFTER
+// all gauges to avoid double-registration.
+const registry = new client.Registry();
+
 const METRIC_REFRESH_INTERVAL_MS = 5000;
 const registeredJobQueues = new Set();
 const registeredWorkers = new Set();
@@ -345,9 +351,6 @@ async function metricsHandler(_req, res) {
   res.end(await registry.metrics());
 }
 
-/** Shared registry — exported so tests can reset it between runs. */
-const registry = new client.Registry();
-
 if (typeof client.collectDefaultMetrics === 'function') {
   client.collectDefaultMetrics({ register: registry });
 }
@@ -406,6 +409,24 @@ const escrowIndexerLastCursorAdvanceTimestampSeconds = new client.Gauge({
 const escrowReconciliationMismatches = new client.Counter({
   name: 'escrow_reconciliation_mismatches_total',
   help: 'Total number of escrow reconciliation mismatches detected',
+  registers: [registry],
+});
+
+/**
+ * Counter: Escrow funding submissions rejected at contract-existence
+ * preflight (issue #436). Incremented once per rejection event, labelled
+ * by `reason` to distinguish the failure class:
+ *   - `not_found`       — the contract address has no on-ledger entry.
+ *   - `rpc_error`       — transport / 5xx / not-found-as-throw error.
+ *   - `invalid_address` — escrowAddress could not be parsed or
+ *                          rounded-tripped through the address XDR.
+ *
+ * @type {import('prom-client').Counter}
+ */
+const escrowPreflightRejectedTotal = new client.Counter({
+  name: 'escrow_preflight_rejected_total',
+  help: 'Total number of escrow funding submissions rejected at the contract-existence preflight, labelled by rejection reason',
+  labelNames: ['reason'],
   registers: [registry],
 });
 
@@ -506,4 +527,8 @@ module.exports = {
   registerWorker,
   refreshMetrics,
   resetMetricsForTests,
+  // Counter exported for issue #436 — contract preflight.
+  // (Other counters in this module are registered against `registry`; their
+  // external-visibility is out of scope for #436.)
+  escrowPreflightRejectedTotal,
 };
