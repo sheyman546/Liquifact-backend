@@ -322,6 +322,20 @@ const footprintCacheEvictionsTotal = new client.Counter({
 });
 
 /**
+ * Counter: Circuit breaker state transitions.
+ * Incremented on every breaker state change.
+ * Label cardinality is bounded by breaker names (Soroban, Redis, KYC, etc.)
+ * and three states (CLOSED, OPEN, HALF_OPEN).
+ * @type {import('prom-client').Counter}
+ */
+const sorobanCircuitBreakerStateTransitionsTotal = new client.Counter({
+  name: 'soroban_circuit_breaker_state_transitions_total',
+  help: 'Total number of circuit breaker state transitions, labeled by breaker name and state',
+  labelNames: ['breaker_name', 'state'],
+  registers: [registry],
+});
+
+/**
  * Gauge: Readiness state (1 = ready, 0 = not ready).
  * Updated by performReadinessChecks() in the health service.
  * @type {import('prom-client').Gauge}

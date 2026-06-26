@@ -843,13 +843,86 @@ tests/load/reports/
 
 ## Resiliency & Retries
 
-### Soroban RPC Circuit Breaker
+### Circuit Breaker (`src/utils/circuitBreaker.js`)
 
-Soroban RPC reads are routed through a circuit breaker to prevent cascading failures during sustained RPC outages.
-The breaker trips to an `OPEN` state after a configurable threshold of failures (default 5) and begins failing fast,
-returning a `503 Service Unavailable` with `code = 'CIRCUIT_OPEN'`.
+The project uses a circuit breaker pattern to protect against cascading failures from unstable external dependencies
+(Soroban RPC, Redis, KYC provider, etc.).
 
-After a recovery timeout (default 10s), the breaker transitions to `HALF_OPEN` and probes the RPC. If successful, it closes and resumes normal operation; if it fails, it re-opens. State transitions are tracked as a Prometheus metric: `soroban_circuit_breaker_state_transitions_total`.
+#### State lifecycle
+
+```
+CLOSED → (failureThreshold reached) → OPEN → (recoveryTimeout elapsed) → HALF_OPEN → (success) → CLOSED
+                                                                                      → (failure) → OPEN
+```
+
+- **CLOSED** — Normal operation; requests pass through to the dependency.
+- **OPEN** — Requests fail fast (or return a fallback) without calling the dependency.
+- **HALF_OPEN** — A single probe request is allowed; success recovers the breaker, failure re-opens it.
+
+#### Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `name` | `'default'` | Unique label attached to Prometheus metrics so each dependency is distinguishable |
+| `failureThreshold` | `5` | Consecutive failures before the breaker trips to OPEN |
+| `recoveryTimeout` | `10000` | Milliseconds before OPEN → HALF_OPEN transition |
+| `fallbackLogic` | `null` | Function returning alternative data when the circuit is OPEN |
+| `onStateChange` | `null` | Callback `(oldState, newState)` fired on every state transition |
+
+#### `reset()` method
+
+Forces the breaker back to the **CLOSED** state and clears the failure count. Operators can call `reset()`
+after deploying a fix to a dependency (e.g., restarting Soroban RPC, redeploying Redis) without waiting
+for the recovery timeout.
+
+```js
+breaker.reset();
+console.log(breaker.state);       // 'CLOSED'
+console.log(breaker.failureCount); // 0
+```
+
+> **Security:** `reset()` is an instance method — it cannot be triggered by untrusted HTTP input. No external
+> caller can force-reset a breaker that it does not hold a reference to.
+
+#### Metrics
+
+Every state transition emits a Prometheus counter:
+
+```
+soroban_circuit_breaker_state_transitions_total{breaker_name="soroban",state="OPEN"}
+```
+
+Labels:
+- `breaker_name` — Distinguishes breakers per dependency (`soroban`, `redis`, `kyc`, …)
+- `state` — The target state (`CLOSED`, `OPEN`, `HALF_OPEN`)
+
+Cardinality is bounded: (#breaker names) × (3 states). The counter is defined in `src/metrics.js` and
+shims gracefully when `prom-client` is not installed (no throws, no-ops).
+
+#### Usage examples
+
+Creating a named breaker:
+
+```js
+const { CircuitBreaker } = require('./utils/circuitBreaker');
+
+const redisBreaker = new CircuitBreaker({
+  name: 'redis',
+  failureThreshold: 3,
+  recoveryTimeout: 5000,
+  fallbackLogic: () => null,
+});
+```
+
+#### Soroban RPC Circuit Breaker
+
+Soroban RPC reads are routed through the shared breaker (`src/services/soroban.js`, name `soroban`).
+Configuration is read from environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SOROBAN_CB_FAILURE_THRESHOLD` | `5` | Consecutive failures before tripping |
+| `SOROBAN_CB_RECOVERY_TIMEOUT` | `10000` | Milliseconds before half-open probe |
 
 ### Security notes
 

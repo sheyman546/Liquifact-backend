@@ -11,7 +11,6 @@
 'use strict';
 
 const { CircuitBreaker } = require('../utils/circuitBreaker');
-const metrics = require('../metrics');
 
 /**
  * Retry configuration used for all Soroban contract calls.
@@ -37,19 +36,12 @@ const RETRYABLE_STATUS_CODES = new Set([429, 502, 503, 504]);
 /**
  * Shared Circuit Breaker instance for all Soroban RPC reads.
  * Protects against cascading failures by failing fast during sustained outages.
+ * State-transition metrics are emitted automatically by the breaker, labeled with name 'soroban'.
  */
 const sharedBreaker = new CircuitBreaker({
+  name: 'soroban',
   failureThreshold: parseInt(process.env.SOROBAN_CB_FAILURE_THRESHOLD || '5', 10),
   recoveryTimeout: parseInt(process.env.SOROBAN_CB_RECOVERY_TIMEOUT || '10000', 10),
-  onStateChange: (oldState, newState) => {
-    if (
-      metrics &&
-      metrics.sorobanCircuitBreakerStateTransitionsTotal &&
-      typeof metrics.sorobanCircuitBreakerStateTransitionsTotal.labels === 'function'
-    ) {
-      metrics.sorobanCircuitBreakerStateTransitionsTotal.labels(newState).inc();
-    }
-  }
 });
 
 /**
