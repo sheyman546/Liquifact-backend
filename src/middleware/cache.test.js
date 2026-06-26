@@ -1,5 +1,7 @@
 const { cacheResponse, invalidatePrefix, makeMarketplaceKey, makeInvestorLocksKey, makeInvestorLockKey } = require('./cache');
 const { MemoryCacheStore, getSharedStore } = require('../services/cacheStore');
+const logger = require('../logger');
+const { cacheStoreErrorsTotal } = require('../metrics');
 
 /**
  * Creates a minimal mock Express response for testing.
@@ -95,7 +97,8 @@ describe('cacheResponse', () => {
     const brokenStore = {
       get() { throw new Error('store broken'); },
     };
-    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    const incSpy = jest.spyOn(cacheStoreErrorsTotal, 'inc').mockImplementation(() => {});
     const middleware = cacheResponse({ ttl: 5000, store: brokenStore });
     const req = { originalUrl: '/api/escrow/123' };
     const res = createMockRes();
@@ -104,7 +107,15 @@ describe('cacheResponse', () => {
       res.json({ data: 'fallthrough' });
       expect(res.body).toEqual({ data: 'fallthrough' });
       expect(warnSpy).toHaveBeenCalled();
+      expect(incSpy).toHaveBeenCalledTimes(1);
+
+      const callArg = warnSpy.mock.calls[0];
+      expect(callArg[1]).toBe('Cache store get error, falling through');
+      expect(callArg[0]).toMatchObject({ err: expect.any(Error), component: 'cache' });
+      expect(callArg[0].err.message).toBe('store broken');
+
       warnSpy.mockRestore();
+      incSpy.mockRestore();
       done();
     });
   });
@@ -114,7 +125,8 @@ describe('cacheResponse', () => {
       get() { return undefined; },
       set() { throw new Error('set broken'); },
     };
-    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    const incSpy = jest.spyOn(cacheStoreErrorsTotal, 'inc').mockImplementation(() => {});
     const middleware = cacheResponse({ ttl: 5000, store: setErrorStore });
     const req = { originalUrl: '/api/escrow/789' };
     const res = createMockRes();
@@ -122,10 +134,108 @@ describe('cacheResponse', () => {
     middleware(req, res, () => {
       res.json({ data: 'still works' });
       expect(res.body).toEqual({ data: 'still works' });
-      expect(warnSpy).toHaveBeenCalledWith('Cache store set error:', 'set broken');
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(incSpy).toHaveBeenCalledTimes(1);
+
+      const callArg = warnSpy.mock.calls[0];
+      expect(callArg[1]).toBe('Cache store set error');
+      expect(callArg[0]).toMatchObject({ err: expect.any(Error), component: 'cache' });
+      expect(callArg[0].err.message).toBe('set broken');
+
       warnSpy.mockRestore();
+      incSpy.mockRestore();
       done();
     });
+  });
+
+  it('uses req.log when available for cache store get error', (done) => {
+    const brokenStore = {
+      get() { throw new Error('req log error'); },
+    };
+    const reqLog = { warn: jest.fn() };
+    const rootWarnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    const incSpy = jest.spyOn(cacheStoreErrorsTotal, 'inc').mockImplementation(() => {});
+    const middleware = cacheResponse({ ttl: 5000, store: brokenStore });
+    const req = { originalUrl: '/api/test', log: reqLog };
+    const res = createMockRes();
+
+    middleware(req, res, () => {
+      res.json({ data: 'ok' });
+      expect(res.body).toEqual({ data: 'ok' });
+      // req.log.warn should have been used, NOT the root logger
+      expect(reqLog.warn).toHaveBeenCalledTimes(1);
+      expect(rootWarnSpy).not.toHaveBeenCalled();
+      expect(incSpy).toHaveBeenCalledTimes(1);
+
+      const callArg = reqLog.warn.mock.calls[0];
+      expect(callArg[1]).toBe('Cache store get error, falling through');
+      expect(callArg[0]).toMatchObject({ err: expect.any(Error), component: 'cache' });
+
+      reqLog.warn.mockRestore();
+      rootWarnSpy.mockRestore();
+      incSpy.mockRestore();
+      done();
+    });
+  });
+
+  it('uses req.log when available for cache store set error', (done) => {
+    const setErrorStore = {
+      get() { return undefined; },
+      set() { throw new Error('req log set error'); },
+    };
+    const reqLog = { warn: jest.fn() };
+    const rootWarnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    const incSpy = jest.spyOn(cacheStoreErrorsTotal, 'inc').mockImplementation(() => {});
+    const middleware = cacheResponse({ ttl: 5000, store: setErrorStore });
+    const req = { originalUrl: '/api/test', log: reqLog };
+    const res = createMockRes();
+
+    middleware(req, res, () => {
+      res.json({ data: 'ok' });
+      expect(res.body).toEqual({ data: 'ok' });
+      expect(reqLog.warn).toHaveBeenCalledTimes(1);
+      expect(rootWarnSpy).not.toHaveBeenCalled();
+      expect(incSpy).toHaveBeenCalledTimes(1);
+
+      const callArg = reqLog.warn.mock.calls[0];
+      expect(callArg[1]).toBe('Cache store set error');
+      expect(callArg[0]).toMatchObject({ err: expect.any(Error), component: 'cache' });
+
+      reqLog.warn.mockRestore();
+      rootWarnSpy.mockRestore();
+      incSpy.mockRestore();
+      done();
+    });
+  });
+
+  it('increments counter on each cache store error', (done) => {
+    let getCallCount = 0;
+    const brokenStore = {
+      get() {
+        getCallCount++;
+        throw new Error('store error ' + getCallCount);
+      },
+    };
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    const incSpy = jest.spyOn(cacheStoreErrorsTotal, 'inc').mockImplementation(() => {});
+    const middleware = cacheResponse({ ttl: 5000, store: brokenStore });
+    const req = { originalUrl: '/api/test' };
+    let callCount = 0;
+
+    function handler() {
+      callCount++;
+      if (callCount === 1) {
+        expect(incSpy).toHaveBeenCalledTimes(1);
+        middleware(req, createMockRes(), handler);
+      } else {
+        expect(incSpy).toHaveBeenCalledTimes(2);
+        warnSpy.mockRestore();
+        incSpy.mockRestore();
+        done();
+      }
+    }
+
+    middleware(req, createMockRes(), handler);
   });
 
   // ── Cache-Control: no-cache bypass ───────────────────────────────────────
@@ -253,15 +363,24 @@ describe('invalidatePrefix', () => {
   });
 
   it('logs and swallows store errors', () => {
-    const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+    const warnSpy = jest.spyOn(logger, 'warn').mockImplementation(() => {});
+    const incSpy = jest.spyOn(cacheStoreErrorsTotal, 'inc').mockImplementation(() => {});
     const brokenStore = {
       delByPrefix() { throw new Error('store error'); },
     };
 
     invalidatePrefix(brokenStore, 'marketplace:');
 
-    expect(warnSpy).toHaveBeenCalledWith('Cache invalidation error:', 'store error');
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(incSpy).toHaveBeenCalledTimes(1);
+
+    const callArg = warnSpy.mock.calls[0];
+    expect(callArg[1]).toBe('Cache invalidation error');
+    expect(callArg[0]).toMatchObject({ err: expect.any(Error), component: 'cache', cachePrefix: 'marketplace:' });
+    expect(callArg[0].err.message).toBe('store error');
+
     warnSpy.mockRestore();
+    incSpy.mockRestore();
   });
 });
 

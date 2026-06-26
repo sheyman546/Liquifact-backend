@@ -84,6 +84,24 @@ try {
   };
 }
 
+/** Shared registry — exported so tests can reset it between runs. */
+const registry = new client.Registry();
+
+if (typeof client.collectDefaultMetrics === 'function') {
+  client.collectDefaultMetrics({ register: registry });
+}
+
+// Cached metrics text for compatibility with tests that call
+// `registry.metrics()` synchronously. Prom-client >=14 returns a Promise
+// from `registry.metrics()`, but some test code calls it without `await`.
+// We provide a synchronous accessor by overriding `registry.metrics`
+// to return the latest cached string; `metricsHandler` still works because
+// awaiting a string yields the string value.
+let cachedMetrics = '# HELP liquifact_custom_metrics Placeholder\n';
+registry.metrics = function metricsSync() {
+  return cachedMetrics;
+};
+
 const METRIC_REFRESH_INTERVAL_MS = 5000;
 const registeredJobQueues = new Set();
 const registeredWorkers = new Set();
@@ -106,17 +124,6 @@ const workerInFlightGauge = new client.Gauge({
   help: 'Number of jobs currently being processed by background workers',
   registers: [registry],
 });
-
-// Cached metrics text for compatibility with tests that call
-// `registry.metrics()` synchronously. Prom-client >=14 returns a Promise
-// from `registry.metrics()`, but some test code calls it without `await`.
-// We provide a synchronous accessor by overriding `registry.metrics`
-// to return the latest cached string; `metricsHandler` still works because
-// awaiting a string yields the string value.
-let cachedMetrics = '# HELP liquifact_custom_metrics Placeholder\n';
-registry.metrics = function metricsSync() {
-  return cachedMetrics;
-};
 
 /**
  * Refresh all registered queue and worker metrics.
@@ -345,13 +352,6 @@ async function metricsHandler(_req, res) {
   res.end(await registry.metrics());
 }
 
-/** Shared registry — exported so tests can reset it between runs. */
-const registry = new client.Registry();
-
-if (typeof client.collectDefaultMetrics === 'function') {
-  client.collectDefaultMetrics({ register: registry });
-}
-
 /**
  * Counter: Escrow events successfully processed by the indexer per cycle.
  * Incremented by the number of events persisted in each indexer cycle.
@@ -498,6 +498,17 @@ const readinessGauge = new client.Gauge({
   registers: [registry],
 });
 
+/**
+ * Counter: Cache store read/write errors that fail open.
+ * Incremented when cache store get/set/delByPrefix throws.
+ * @type {import('prom-client').Counter}
+ */
+const cacheStoreErrorsTotal = new client.Counter({
+  name: 'cache_store_errors_total',
+  help: 'Total number of cache store errors (get/set/invalidate) that fail open',
+  registers: [registry],
+});
+
 module.exports = {
   registry,
   metricsAuth,
@@ -506,4 +517,18 @@ module.exports = {
   registerWorker,
   refreshMetrics,
   resetMetricsForTests,
+  cacheStoreErrorsTotal,
+  footprintCacheHitsTotal,
+  footprintCacheMissesTotal,
+  footprintCacheEvictionsTotal,
+  escrowIndexerEventsProcessedTotal,
+  escrowIndexerEventsSkippedTotal,
+  escrowIndexerCycleFailuresTotal,
+  escrowIndexerLastCursorAdvanceTimestampSeconds,
+  escrowReconciliationMismatches,
+  maturityReminderDeliveryAttemptsTotal,
+  maturityReminderDeliverySuccessTotal,
+  maturityReminderDeadLetterTotal,
+  sorobanCircuitBreakerStateTransitionsTotal,
+  readinessGauge,
 };
