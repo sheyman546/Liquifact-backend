@@ -55,6 +55,9 @@ describe('Maturity Reminders Job', () => {
       const transport = getTransport();
       expect(transport).toBeDefined();
       expect(transport.sendMail).toBeDefined();
+      expect(transport.options).toBeDefined();
+      expect(transport.options.host).toBe('smtp.example.com');
+      expect(transport.options.port).toBe(587);
     });
 
     it('returns a nodemailer transport when SMTP_HOST is set but port defaults', () => {
