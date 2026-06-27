@@ -10,6 +10,40 @@ The Invoice Lifecycle API implements a secure state machine for managing invoice
 
 **Response envelope:** Success and error responses use the standardized envelope from `responseHelper` (`data`, `meta`, `error` fields).
 
+**Idempotency:** All POST endpoints that transition invoice state support idempotency via the `Idempotency-Key` header. This allows safe retry of requests that may have failed due to network issues. The idempotency key must be a unique string (8-128 characters, URL-safe). Using the same key with the same request body will return the cached response from the first successful request. Using the same key with a different request body will return a 409 Conflict error.
+
+## Idempotency
+
+### Overview
+All invoice state transition endpoints (`POST /api/invoices/:id/transition`, `POST /api/invoices/:id/approve`, `POST /api/invoices/:id/link-escrow`, `POST /api/invoices/:id/reject`) require the `Idempotency-Key` header for safe client retries.
+
+### Usage
+- Generate a unique idempotency key for each distinct request
+- Include the key in the `Idempotency-Key` header
+- If a request fails (e.g., network timeout), retry with the same key to safely get the original result
+- Idempotency keys are stored for 24 hours (configurable via `IDEMPOTENCY_KEY_TTL_HOURS` environment variable)
+
+### Headers
+- `Idempotency-Key`: Unique key for idempotent requests (required)
+  - Must be 8-128 characters long
+  - Must be URL-safe (alphanumeric, `.`, `_`, `:`, `-`)
+
+### Example
+```bash
+curl -X POST http://localhost:3001/api/invoices/inv-001/transition \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: my-unique-key-12345" \
+  -d '{
+    "targetState": "approved",
+    "reason": "Invoice verified and approved by finance team"
+  }'
+```
+
+### Error Responses
+- **400 Bad Request**: Missing or invalid `Idempotency-Key` header
+- **409 Conflict**: Same idempotency key used with different request body
+
 ## State Machine
 
 ### States

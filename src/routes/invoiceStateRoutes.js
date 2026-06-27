@@ -24,6 +24,7 @@ const invoiceService = require('../services/invoiceService');
 const { getAuditLogs } = require('../services/auditLog');
 const { requireKycForFunding } = require('../middleware/kycGating');
 const { extractTenant } = require('../middleware/tenant');
+const idempotencyMiddleware = require('../middleware/idempotency');
 const responseHelper = require('../utils/responseHelper');
 
 /**
@@ -140,7 +141,7 @@ function conditionalKycGate(req, res, next) {
  *   "reason": "Invoice verified and approved by finance team"
  * }
  */
-router.post('/:id/transition', conditionalKycGate, async (req, res, next) => {
+router.post('/:id/transition', conditionalKycGate, idempotencyMiddleware, async (req, res, next) => {
   const { id } = req.params;
   const { targetState, reason } = req.body;
 
@@ -190,7 +191,7 @@ router.post('/:id/transition', conditionalKycGate, async (req, res, next) => {
  * POST /api/invoices/:id/approve
  * Convenience endpoint to approve an invoice
  */
-router.post('/:id/approve', async (req, res, next) => {
+router.post('/:id/approve', idempotencyMiddleware, async (req, res, next) => {
   const { id } = req.params;
   const { reason } = req.body;
 
@@ -237,7 +238,7 @@ router.post('/:id/approve', async (req, res, next) => {
  * This is a capital-movement endpoint: it initiates the escrow funding
  * lifecycle. KYC must be verified before the link can be made.
  */
-router.post('/:id/link-escrow', requireKycForFunding, async (req, res, next) => {
+router.post('/:id/link-escrow', requireKycForFunding, idempotencyMiddleware, async (req, res, next) => {
   const { id } = req.params;
   const { escrowId, reason } = req.body;
 
@@ -327,7 +328,7 @@ router.get('/:id/history', async (req, res, next) => {
  * POST /api/invoices/:id/reject
  * Convenience endpoint to reject an invoice
  */
-router.post('/:id/reject', async (req, res, next) => {
+router.post('/:id/reject', idempotencyMiddleware, async (req, res, next) => {
   const { id } = req.params;
   const { reason } = req.body;
 
