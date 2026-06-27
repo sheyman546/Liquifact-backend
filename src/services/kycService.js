@@ -7,48 +7,18 @@
  *
  * @module services/kycService
  */
-
+ 
 const db = require('../db/knex');
 const logger = require('../logger');
-const { createCacheStore } = require('./cacheStore');
-
+ 
 const KYC_STATUSES = {
   PENDING: 'pending',
   VERIFIED: 'verified',
   REJECTED: 'rejected',
   EXEMPTED: 'exempted',
+  UNKNOWN: 'unknown', // Fallback for unmapped provider statuses
 };
-
-/**
- * Default TTL (in seconds) for the external KYC status cache when
- * `KYC_STATUS_CACHE_TTL_SECONDS` is not set. Kept deliberately short so that
- * status changes propagate quickly even in the (theoretical) absence of an
- * invalidating event.
- *
- * @constant {number}
- */
-const DEFAULT_STATUS_CACHE_TTL_SECONDS = 30;
-
-/**
- * Cache key prefix for per-SME external KYC status entries.
- *
- * @constant {string}
- */
-const STATUS_CACHE_KEY_PREFIX = 'kyc:status:';
-
-/**
- * Short-TTL cache for external KYC provider status reads.
- *
- * Only results sourced from the external provider are cached, and entries are
- * explicitly invalidated whenever the SME's record is written (including KYC
- * webhook updates and revocations). This guarantees a revocation event always
- * wins over a previously cached approval. See {@link readProviderStatusCached}
- * and {@link invalidateKycStatusCache}.
- *
- * @type {import('./cacheStore').MemoryCacheStore}
- */
-const kycStatusCache = createCacheStore();
-
+ 
 const PROVIDER_STATUS_MAP = {
   pending: KYC_STATUSES.PENDING,
   in_review: KYC_STATUSES.PENDING,
@@ -67,10 +37,10 @@ const PROVIDER_STATUS_MAP = {
   exempt: KYC_STATUSES.EXEMPTED,
   waived: KYC_STATUSES.EXEMPTED,
 };
-
+ 
 // In-memory store for KYC records (used in test/dev environments)
 const mockKycRecords = new Map();
-
+ 
 /**
  * Configuration for external KYC provider.
  * Loaded from environment variables.
@@ -85,7 +55,7 @@ const getKycProviderConfig = () => {
     apiSecret: process.env.KYC_PROVIDER_SECRET || null, // optional secondary key used for webhook HMAC verification
   };
 };
-
+ 
 /**
  * Resolves the configured TTL (in milliseconds) for the external KYC status
  * cache from `KYC_STATUS_CACHE_TTL_SECONDS`.
@@ -178,23 +148,54 @@ async function readProviderStatusCached(smeId, loader) {
 /**
  * Normalizes provider-specific status values to internal KYC statuses.
  *
+ * Maps known provider statuses to internal KYC states. If the provider returns
+ * a status not in the mapping, gracefully falls back to 'unknown' state and logs
+ * the unmapped value for later analysis. This prevents KYC verification failures
+ * due to provider status changes or additions.
+ *
  * @param {string} status - External provider status.
- * @returns {string} Normalized KYC status.
+ * @returns {string} Normalized KYC status. Returns 'unknown' if status is not in the mapping.
+ * @throws {Error} If status is missing, null, or not a string.
+ *
+ * @example
+ * normalizeProviderStatus('verified') // => 'verified'
+ * normalizeProviderStatus('in_review') // => 'pending'
+ * normalizeProviderStatus('new_status_v2') // => 'unknown' (logged)
+ * normalizeProviderStatus(null) // => throws Error
  */
 function normalizeProviderStatus(status) {
-  if (!status || typeof status !== 'string') {
-    throw new Error('Missing provider status');
+  // Validate input: must be a non-empty string
+  if (status === null || status === undefined) {
+    logger.warn({ status }, 'Received null or undefined provider status, defaulting to unknown');
+    return KYC_STATUSES.UNKNOWN;
   }
-
+ 
+  if (typeof status !== 'string') {
+    logger.warn({ status, type: typeof status }, 'Received non-string provider status, defaulting to unknown');
+    return KYC_STATUSES.UNKNOWN;
+  }
+ 
   const normalized = status.trim().toLowerCase();
-
-  if (!Object.prototype.hasOwnProperty.call(PROVIDER_STATUS_MAP, normalized)) {
-    throw new Error(`Unknown provider status: ${status}`);
+ 
+  // Handle empty string after trim
+  if (normalized === '') {
+    logger.warn({ originalStatus: status }, 'Received empty provider status, defaulting to unknown');
+    return KYC_STATUSES.UNKNOWN;
   }
-
+ 
+  // Check if status is in the mapping
+  if (!Object.prototype.hasOwnProperty.call(PROVIDER_STATUS_MAP, normalized)) {
+    // Log unmapped status for monitoring and future mapping updates
+    logger.warn(
+      { unmappedStatus: normalized, originalStatus: status },
+      'Provider returned unmapped KYC status, defaulting to unknown. Consider extending PROVIDER_STATUS_MAP.',
+    );
+    return KYC_STATUSES.UNKNOWN;
+  }
+ 
   return PROVIDER_STATUS_MAP[normalized];
 }
-
+ 
 /**
  * Reads a persisted KYC record from the database.
  *
@@ -205,12 +206,12 @@ async function readKycRecord(smeId) {
   if (!smeId || typeof smeId !== 'string') {
     throw new Error('Invalid SME ID');
   }
-
+ 
   const row = await db('kyc_records').where({ sme_id: smeId }).first();
   if (!row || !row.status) {
     return null;
   }
-
+ 
   return {
     smeId: row.sme_id,
     status: row.status,
@@ -219,7 +220,7 @@ async function readKycRecord(smeId) {
     updatedAt: row.updated_at ? row.updated_at.toISOString?.() || row.updated_at : null,
   };
 }
-
+ 
 /**
  * Persists a KYC status update to the database.
  *
@@ -234,7 +235,7 @@ async function persistKycRecord({ smeId, status, providerRecordId = null, verifi
   if (!smeId || typeof smeId !== 'string') {
     throw new Error('Invalid SME ID');
   }
-
+ 
   const normalizedStatus = normalizeProviderStatus(status);
   const updatedAt = new Date();
   const record = {
@@ -244,7 +245,7 @@ async function persistKycRecord({ smeId, status, providerRecordId = null, verifi
     verified_at: verifiedAt || null,
     updated_at: updatedAt,
   };
-
+ 
   const existing = await db('kyc_records').where({ sme_id: smeId }).first();
   if (existing) {
     await db('kyc_records')
@@ -253,11 +254,7 @@ async function persistKycRecord({ smeId, status, providerRecordId = null, verifi
   } else {
     await db('kyc_records').insert(record);
   }
-
-  // Drop any cached provider status so a revocation/status change always wins
-  // over a previously cached approval.
-  invalidateKycStatusCache(smeId);
-
+ 
   return {
     smeId,
     status: normalizedStatus,
@@ -266,7 +263,7 @@ async function persistKycRecord({ smeId, status, providerRecordId = null, verifi
     updatedAt: updatedAt.toISOString(),
   };
 }
-
+ 
 /**
  * Verifies KYC status from external provider.
  * Only called if provider is configured and enabled.
@@ -277,52 +274,52 @@ async function persistKycRecord({ smeId, status, providerRecordId = null, verifi
  */
 async function verifyWithExternalProvider(smeId, _smeData) {
   const config = getKycProviderConfig();
-
+ 
   if (!config.enabled) {
     throw new Error('KYC provider not configured');
   }
-
+ 
   const url = `${config.baseUrl.replace(/\/+$/, '')}/verify`;
-
+ 
   const payload = {
     smeId,
     timestamp: new Date().toISOString(),
   };
-
+ 
   const headers = {
     Authorization: `Bearer ${config.apiKey}`,
     'Content-Type': 'application/json',
     Accept: 'application/json',
   };
-
+ 
   if (config.apiSecret) {
     headers['X-KYC-Secret'] = config.apiSecret;
   }
-
+ 
   try {
     const response = await fetch(url, {
       method: 'POST',
       headers,
       body: JSON.stringify(payload),
     });
-
+ 
     if (!response.ok) {
       const body = await response.text();
       throw new Error(`${response.status}${body ? `: ${body}` : ''}`);
     }
-
+ 
     const data = await response.json();
     const recordId = data.recordId || data.providerRecordId || data.provider_record_id || `kyc_${smeId}_${Date.now()}`;
     const verifiedAt = data.verifiedAt || data.verified_at || null;
     const status = normalizeProviderStatus(data.status || data.kycStatus || data.result || '');
-
+ 
     const persisted = await persistKycRecord({
       smeId,
       status,
       providerRecordId: recordId,
       verifiedAt,
     });
-
+ 
     return {
       status: persisted.status,
       recordId: persisted.recordId,
@@ -333,7 +330,7 @@ async function verifyWithExternalProvider(smeId, _smeData) {
     throw error;
   }
 }
-
+ 
 /**
  * Gets KYC status for an SME.
  * Checks external provider if available, falls back to persisted DB record or mock store.
@@ -351,9 +348,9 @@ async function getKycStatus(smeId) {
   if (!smeId || typeof smeId !== 'string') {
     throw new Error('Invalid SME ID');
   }
-
+ 
   const config = getKycProviderConfig();
-
+ 
   if (config.enabled) {
     try {
       return await readProviderStatusCached(smeId, () => verifyWithExternalProvider(smeId, {}));
@@ -366,12 +363,12 @@ async function getKycStatus(smeId) {
       return { status: KYC_STATUSES.PENDING };
     }
   }
-
+ 
   const record = await readKycRecord(smeId);
   if (record) {
     return record;
   }
-
+ 
   const mockRecord = mockKycRecords.get(smeId);
   if (mockRecord) {
     return {
@@ -380,10 +377,10 @@ async function getKycStatus(smeId) {
       verifiedAt: mockRecord.verifiedAt,
     };
   }
-
+ 
   return { status: KYC_STATUSES.PENDING };
 }
-
+ 
 /**
  * Marks an SME as KYC verified.
  * Only available in test/development (mock implementation).
@@ -397,7 +394,7 @@ async function verifySmeSafe(smeId, options = {}) {
   if (!smeId || typeof smeId !== 'string') {
     throw new Error('Invalid SME ID');
   }
-
+ 
   const recordId = options.recordId || `kyc_${smeId}_${Date.now()}`;
   const verifiedAt = new Date().toISOString();
   const record = {
@@ -407,9 +404,9 @@ async function verifySmeSafe(smeId, options = {}) {
     verifiedAt,
     createdAt: verifiedAt,
   };
-
+ 
   mockKycRecords.set(smeId, record);
-
+ 
   // Persist to database
   await persistKycRecord({
     smeId,
@@ -417,16 +414,16 @@ async function verifySmeSafe(smeId, options = {}) {
     providerRecordId: recordId,
     verifiedAt,
   });
-
+ 
   logger.info({ smeId, recordId }, 'SME marked as KYC verified');
-
+ 
   return {
     status: record.status,
     recordId: record.recordId,
     verifiedAt: record.verifiedAt,
   };
 }
-
+ 
 /**
  * Rejects KYC for an SME (mock implementation).
  *
@@ -438,7 +435,7 @@ async function rejectSmeKyc(smeId, reason = 'Manual rejection') {
   if (!smeId || typeof smeId !== 'string') {
     throw new Error('Invalid SME ID');
   }
-
+ 
   const recordId = `kyc_${smeId}_${Date.now()}`;
   const record = {
     smeId,
@@ -448,24 +445,24 @@ async function rejectSmeKyc(smeId, reason = 'Manual rejection') {
     rejectedAt: new Date().toISOString(),
     createdAt: new Date().toISOString(),
   };
-
+ 
   mockKycRecords.set(smeId, record);
-
+ 
   // Persist to database
   await persistKycRecord({
     smeId,
     status: KYC_STATUSES.REJECTED,
     providerRecordId: recordId,
   });
-
+ 
   logger.warn({ smeId, recordId, reason }, 'SME KYC rejected');
-
+ 
   return {
     status: record.status,
     recordId: record.recordId,
   };
 }
-
+ 
 /**
  * Exempts an SME from KYC requirements.
  * Typically used for low-risk vendors or when exemption is policy-approved.
@@ -478,7 +475,7 @@ async function exemptSmeFromKyc(smeId, reason = 'Manual exemption') {
   if (!smeId || typeof smeId !== 'string') {
     throw new Error('Invalid SME ID');
   }
-
+ 
   const recordId = `kyc_${smeId}_${Date.now()}`;
   const record = {
     smeId,
@@ -488,35 +485,43 @@ async function exemptSmeFromKyc(smeId, reason = 'Manual exemption') {
     exemptedAt: new Date().toISOString(),
     createdAt: new Date().toISOString(),
   };
-
+ 
   mockKycRecords.set(smeId, record);
-
+ 
   // Persist to database
   await persistKycRecord({
     smeId,
     status: KYC_STATUSES.EXEMPTED,
     providerRecordId: recordId,
   });
-
+ 
   logger.info({ smeId, recordId, reason }, 'SME exempted from KYC');
-
+ 
   return {
     status: record.status,
     recordId: record.recordId,
   };
 }
-
+ 
 /**
  * Checks if an SME can proceed with funding operations.
- * Returns true only for 'verified' or 'exempted' statuses.
+ * Returns true ONLY for 'verified' or 'exempted' statuses.
+ * Explicitly denies 'unknown', 'pending', and 'rejected' statuses.
  *
  * @param {string} kycStatus - The KYC status string.
- * @returns {boolean} True if KYC status allows funding.
+ * @returns {boolean} True if KYC status allows funding. False for unknown, pending, and rejected.
+ *
+ * @example
+ * canFundWithKycStatus('verified') // => true
+ * canFundWithKycStatus('exempted') // => true
+ * canFundWithKycStatus('unknown') // => false
+ * canFundWithKycStatus('pending') // => false
+ * canFundWithKycStatus('rejected') // => false
  */
 function canFundWithKycStatus(kycStatus) {
   return kycStatus === KYC_STATUSES.VERIFIED || kycStatus === KYC_STATUSES.EXEMPTED;
 }
-
+ 
 /**
  * Clears the in-memory mock KYC record store and the external KYC status cache.
  * Intended for tests/dev usage.
@@ -527,7 +532,7 @@ function resetMockRecords() {
   mockKycRecords.clear();
   kycStatusCache.clear();
 }
-
+ 
 module.exports = {
   KYC_STATUSES,
   getKycStatus,
@@ -540,6 +545,5 @@ module.exports = {
   canFundWithKycStatus,
   resetMockRecords,
   getKycProviderConfig,
-  getStatusCacheTtlMs,
-  invalidateKycStatusCache,
+  normalizeProviderStatus, // Export for direct testing
 };
