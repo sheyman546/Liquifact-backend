@@ -63,6 +63,33 @@ const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{8,128}$/;
  * @param {string} params.invoiceId       — used for idempotency / memo
  * @returns {Promise<EscrowSubmitResult>}
  */
+
+const MEMO_MAX_BYTES = 28;
+
+/**
+ * Builds a validated Stellar text memo for the invoice ID.
+ * @param {string} invoiceId - The invoice identifier.
+ * @returns {{ type: string, value: string }} Stellar memo object.
+ * @throws {EscrowSubmitError} If memo exceeds 28-byte Stellar limit.
+ */
+function buildMemo(invoiceId) {
+  const memoValue = `lq:${invoiceId}`;
+  const byteLength = Buffer.byteLength(memoValue, 'utf8');
+
+  if (byteLength > MEMO_MAX_BYTES) {
+    console.warn(
+      `Escrow memo truncation detected: "${memoValue}" is ${byteLength} bytes, ` +
+      `exceeds Stellar limit of ${MEMO_MAX_BYTES}. Invoice ID would be lost.`
+    )
+    throw new EscrowSubmitError(
+      `Escrow memo truncation detected: "${memoValue}" is ${byteLength} bytes, ` +
+      `exceeds Stellar limit of ${MEMO_MAX_BYTES}. Invoice ID would be lost.`
+    );
+  }
+
+  return { type: 'text', value: memoValue };
+}
+
 async function submitFundEscrow({ escrowAddress, investorAddress, amountStroops, invoiceId }) {
   const mode = (process.env.ESCROW_SIGNING_MODE || SIGNING_MODE.STUBBED).toLowerCase();
 
@@ -103,7 +130,7 @@ async function submitFundEscrow({ escrowAddress, investorAddress, amountStroops,
     networkPassphrase: passphrase,
   })
     .addOperation(operation)
-    .addMemo({ type: 'text', value: `lq:${invoiceId}`.slice(0, 28) })
+    .addMemo(buildMemo(invoiceId))
     .setTimeout(180)
     .build();
 
@@ -214,4 +241,5 @@ module.exports = {
   EscrowSubmitError,
   SIGNING_MODE,
   IDEMPOTENCY_KEY_PATTERN,
+  buildMemo
 };
